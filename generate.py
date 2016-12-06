@@ -7,6 +7,7 @@ from io_funcs.binary_io import BinaryIOCollection
 
 
 def run_process(args, log=True):
+    logging.info("Begin")
 
     logger = logging.getLogger("subprocess")
 

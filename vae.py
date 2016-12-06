@@ -1,18 +1,19 @@
 """
 Usage:
-THEANO_FLAGS=mode=FAST_RUN,device=gpu,floatX=float32 python -u vae.py --n_frames 30 \
+THEANO_FLAGS=mode=FAST_RUN,device=gpu,floatX=float32 python -u vae.py --n_frames 50 \
 --weight_norm True --skip_conn True --dim 1024 --n_rnn 3 --bidirectional False \
---rnn_type GRU --learn_h0 False --batch_size 32 --kgmm 10 
+--rnn_type LSTM --learn_h0 False --batch_size 32 --kgmm 10 --dataset vctk
 """
 
+"""
+TODO: There seems to be sime bug with GRU. Rectify it asap.
+"""
 
-
-import datasets
 import sys
 import os
 
 assert(os.environ['NN_LIB'])
-sys.path.append(os.environ['NN_LIB'])
+sys.path.insert(1, os.environ['NN_LIB'])
 
 import lib
 import lib.ops
@@ -36,8 +37,15 @@ import theano
 import theano.tensor as T
 import theano.ifelse
 import lasagne
+import itertools
 
+from theano.sandbox.rng_mrg import MRG_RandomStreams
+
+import datasets
 from gmm_utils import cost_gmm, sample_gmm
+from generate import generate_wav
+
+theano_rng = MRG_RandomStreams(457)
 
 def get_args():
     def t_or_f(arg):
@@ -89,10 +97,13 @@ def get_args():
     parser.add_argument('--learn_h0', help='Whether to learn the initial state of RNN',\
             type=t_or_f, required=True)
     parser.add_argument('--batch_size', help='size of mini-batch',
-            type=check_positive, choices=[32, 64, 128, 256], required=True)
+            type=check_positive, choices=[8, 16, 32, 64, 128, 256], required=True)
 
     parser.add_argument('--kgmm', help='Number of components in GMM',
             type=check_positive, required=True)
+
+    parser.add_argument('--dataset', help='Datsets',
+            choices=['arctic', 'blizzard', 'vctk'], required=True)
 
     parser.add_argument('--lr', help='Initial learning rate',
             type=lib.floatX, default = lib.floatX(0.001))
@@ -125,6 +136,8 @@ FOLDER_PREFIX = '/Tmp/kumarkun/vocoder_vae'
 GRAD_CLIP = args.grad_clip
 LEARNING_RATE = args.lr
 
+LEARNING_RATE_DECAY = 5e-5
+
 N_FRAMES = args.n_frames # How many 'frames' to include in each truncated BPTT pass
 WEIGHT_NORM = args.weight_norm
 SKIP_CONN = args.skip_conn
@@ -139,16 +152,35 @@ BATCH_SIZE = args.batch_size
 RESUME = args.resume
 EPS = 1e-5
 VOCODER_DIM = 63
-INPUT_DIM = 400
+INPUT_DIM = 420
 OUTPUT_DIM = VOCODER_DIM
 
 K_GMM = args.kgmm
 
-print os.environ['FUEL_DATA_PATH']
+DATASET = args.dataset
+
+SPTK_DIR = '/data/lisatmp4/kumarkun/merlin/tools/bin/SPTK-3.9/'
+WORLD_DIR = '/data/lisatmp4/kumarkun/merlin/tools/bin/WORLD/'
+
+data_dir = None
+
+for loc in os.environ['FUEL_DATA_PATH'].split(':'):
+    if os.path.exists(os.path.join(loc, DATASET)):
+        data_dir = loc
+        print "Data will be loaded from {}".format(data_dir)
+
+OUT_DIR = os.path.join(FOLDER_PREFIX, tag)
+
+if not os.path.exists(OUT_DIR):
+    os.makedirs(OUT_DIR)
+
+
+
 
 def Encoder(speech, h0):
     """
-    Create inference model to infer one single latent variable using bidirectional GRU followed by non-causal dilated convolutions
+    Create inference model to infer one single latent variable using bidirectional GRU \
+    followed by non-causal dilated convolutions
     """
     if RNN_TYPE == 'GRU':
         rnns_out, last_hidden = lib.ops.stackedGRU('Encoder.GRU',
@@ -169,7 +201,33 @@ def Encoder(speech, h0):
                                                     weightnorm=WEIGHT_NORM,
                                                     skip_conn=SKIP_CONN)
 
-    return rnns_out.mean(axis = 1)
+    output1 = T.nnet.relu(rnns_out.mean(axis = 1))
+
+
+    output2 = lib.ops.Linear(
+        'Encoder.Output2',
+        DIM,
+        DIM,
+        output1,
+        weightnorm=WEIGHT_NORM
+    )
+
+    output3 = T.nnet.relu(output2)
+
+
+    output4 = lib.ops.Linear(
+        'Encoder.Output4',
+        DIM,
+        2*LATENT_DIM,
+        output3,
+        initialization='he',
+        weightnorm=WEIGHT_NORM
+    )
+
+    mu = output4[:,::2]
+    log_sigma = output4[:,1::2]
+
+    return mu, log_sigma
 
 def decoder(latent_var, text_features, h0, reset):
     """
@@ -186,45 +244,94 @@ def decoder(latent_var, text_features, h0, reset):
     learned_h0 = T.unbroadcast(learned_h0, 0, 1, 2)
     h0 = theano.ifelse.ifelse(reset, learned_h0, h0)
 
-    rnns_out, last_hidden = lib.ops.stackedLSTM('Decoder.LSTM',
+    if latent_var is not None:
+        latent_var_repeated = T.extra_ops.repeat(latent_var[:,None,:], text_features.shape[1], axis = 1)
+        features = T.concatenate([text_features, latent_var], axis = 1)
+        RNN_INPUT_DIM = INPUT_DIM + LATENT_DIM
+    else:
+        RNN_INPUT_DIM = INPUT_DIM
+        features = text_features
+
+    if RNN_TYPE == 'LSTM':
+        rnns_out, last_hidden = lib.ops.stackedLSTM('Decoder.LSTM',
                                                     N_RNN,
-                                                    INPUT_DIM,
+                                                    RNN_INPUT_DIM,
                                                     DIM,
-                                                    text_features,
+                                                    features,
                                                     h0=h0,
                                                     weightnorm=WEIGHT_NORM,
                                                     skip_conn=SKIP_CONN)
+    else:
+        rnns_out, last_hidden = lib.ops.stackedGRU('Decoder.GRU',
+                                                    N_RNN,
+                                                    RNN_INPUT_DIM,
+                                                    DIM,
+                                                    features,
+                                                    h0=h0,
+                                                    weightnorm=WEIGHT_NORM,
+                                                    skip_conn=SKIP_CONN)
+    output1 = T.nnet.relu(rnns_out)
+
+
+    output2 = lib.ops.Linear(
+        'Decoder.Output1',
+        DIM,
+        DIM,
+        output1,
+        weightnorm=WEIGHT_NORM
+    )
+
+    output3 = T.nnet.relu(output2)
 
     output = lib.ops.Linear(
-        'Decoder.Output',
+        'Decoder.Output2',
         DIM,
         (2* OUTPUT_DIM + 1)*K_GMM,
-        rnns_out,
+        output3,
         initialization='he',
         weightnorm=WEIGHT_NORM
     )
 
-    mu = output[:,:OUTPUT_DIM*K_GMM]
-    sig = T.exp(output[:,OUTPUT_DIM*K_GMM : 2*OUTPUT_DIM*K_GMM]) + lib.floatX(EPS)
-    weights = output[:,-K_GMM:]
+
+    mu_raw = output[:,:,:OUTPUT_DIM*K_GMM]
+
+    mu = T.clip(mu_raw, lib.floatX(-6.), lib.floatX(6.))
+
+    log_sig = output[:,:,OUTPUT_DIM*K_GMM : 2*OUTPUT_DIM*K_GMM]
+
+    sig = T.exp(log_sig) + lib.floatX(EPS)
+
+    # sig = T.clip(sig, , lib.floatX(2.))
+
+    weights_raw = output[:,:,-K_GMM:]
+    weights = T.nnet.softmax(weights_raw.reshape((-1, K_GMM))).reshape(weights_raw.shape) + lib.floatX(EPS)
 
     return mu, sig, weights, last_hidden
 
 
 
 
-text_features = T.tensor3('text_features')
-vocoder_audio = T.tensor3('vocoder_audio')
+text_features_raw = T.tensor3('text_features_raw') # shape (time-steps, batch, INPUT_DIM)
+text_features     = text_features_raw.dimshuffle(1,0,2)
+
+vocoder_audio_raw = T.tensor3('vocoder_audio_raw') # shape (time-steps, batch, VOCODER_DIM)
+vocoder_audio     = vocoder_audio_raw.dimshuffle(1,0,2)
+
 h0        = T.tensor3('h0')
 reset     = T.iscalar('reset')
-mask      = T.matrix('mask')
+lr        = T.scalar('lr')
+
+mask_raw      = T.matrix('mask_raw') # shape (time-steps, batch)
+mask = mask_raw.dimshuffle(1,0)
 
 
 mu, sigma, weights, last_hidden = decoder(None, text_features, h0, reset)
 
-cost = cost_gmm(vocoder_audio, mu, sigma, weights)
+samples = sample_gmm(mu, sigma, weights, theano_rng)
 
-cost = T.sum(cost * mask)/mask.sum()
+cost_raw = cost_gmm(vocoder_audio, mu, sigma, weights)
+
+cost = T.sum(cost_raw * mask)/(mask.sum() + 1e-5)
 
 params = lib.get_params(cost, lambda x: hasattr(x, 'param') and x.param==True)
 lib.print_params_info(params, path=FOLDER_PREFIX)
@@ -232,15 +339,156 @@ lib.print_params_info(params, path=FOLDER_PREFIX)
 grads = T.grad(cost, wrt=params, disconnected_inputs='warn')
 grads = [T.clip(g, lib.floatX(-GRAD_CLIP), lib.floatX(GRAD_CLIP)) for g in grads]
 
-updates = lasagne.updates.adam(grads, params, learning_rate=LEARNING_RATE)
+updates = lasagne.updates.adam(grads, params, learning_rate=lr)
 
 
 train_fn = theano.function(
-    [text_features, h0, reset, mask, vocoder_audio],
+    [text_features_raw, h0, reset, mask_raw, vocoder_audio_raw, lr],
     [cost, last_hidden],
     updates = updates
 )
 
-data_stream = datasets.parrot_stream('vctk', True)
+valid_fn = theano.function(
+    [text_features_raw, h0, reset, mask_raw, vocoder_audio_raw],
+    [cost, last_hidden]
+)
 
-import ipdb; ipdb.set_trace()
+sample_fn = theano.function(
+    [text_features_raw, h0, reset],
+    [samples, last_hidden]
+)
+
+
+h0_init = lib.floatX(numpy.zeros((BATCH_SIZE, N_RNN, H0_MULT*DIM)))
+
+def sampler(save_dir, samples_name, do_post_filtering):
+    test_stream = datasets.parrot_stream(
+            DATASET,
+            use_speaker=False,
+            which_sets=('test',),
+            batch_size= BATCH_SIZE,
+            seq_size=N_FRAMES
+    )
+
+    test_iterator = test_stream.get_epoch_iterator()
+
+    last_hidden = h0_init
+
+    actual_so_far_raw, mask_raw, text_features_raw, reset = next(test_iterator)
+
+    samples_so_far, last_hidden = sample_fn(text_features_raw, last_hidden, reset)
+
+    mask_so_far = mask_raw
+
+    actual_so_far_next_raw, mask_raw, text_features_raw, reset = next(test_iterator)
+
+    while reset != 1 :
+        samples_next, last_hidden = sample_fn(text_features_raw, last_hidden, reset)
+
+        samples_so_far = numpy.concatenate((samples_so_far, samples_next), axis = 1)
+        actual_so_far_raw = numpy.concatenate((actual_so_far_raw, actual_so_far_next_raw), axis = 0)
+
+        actual_so_far_next_raw, mask_raw, text_features_raw, reset = next(test_iterator)
+
+        mask_so_far = numpy.concatenate((mask_so_far, mask_raw), axis = 0)
+
+    actual_so_far = actual_so_far_raw.transpose((1,0,2))
+
+
+    norm_info_file = os.path.join(
+        data_dir, DATASET,
+        'norm_info_mgc_lf0_vuv_bap_63_MVN.dat')
+
+    if not os.path.exists(os.path.join(save_dir, 'samples')):
+        os.makedirs(os.path.join(save_dir, 'samples'))
+
+    if not os.path.exists(os.path.join(save_dir, 'actual_samples')):
+        os.makedirs(os.path.join(save_dir, 'actual_samples'))
+
+    for i, this_sample in enumerate(actual_so_far):
+        this_sample = this_sample[:int(mask_so_far.sum(axis=0)[i])]
+
+        generate_wav(
+            this_sample,
+            os.path.join(save_dir, 'actual_samples'),
+            samples_name + '_' + str(i),
+            sptk_dir = SPTK_DIR,
+            world_dir = WORLD_DIR,
+            norm_info_file = norm_info_file,
+            do_post_filtering = do_post_filtering)
+
+
+    for i, this_sample in enumerate(samples_so_far):
+        this_sample = this_sample[:int(mask_so_far.sum(axis=0)[i])]
+
+        generate_wav(
+            this_sample,
+            os.path.join(save_dir, 'samples'),
+            samples_name + '_' + str(i),
+            sptk_dir = SPTK_DIR,
+            world_dir = WORLD_DIR,
+            norm_info_file = norm_info_file,
+            do_post_filtering = do_post_filtering)
+
+
+train_stream = datasets.parrot_stream(
+            DATASET,
+            use_speaker=False,
+            which_sets=('train',),
+            batch_size= BATCH_SIZE,
+            seq_size=N_FRAMES
+        )
+
+valid_stream = datasets.parrot_stream(
+            DATASET,
+            use_speaker=False,
+            which_sets=('valid',),
+            batch_size= BATCH_SIZE,
+            seq_size=N_FRAMES
+        )
+
+
+total_iters = 0
+total_time = 0.
+
+train_costs = []
+valid_costs = []
+
+valid_iters = []
+
+print "Training"
+
+for epoch in itertools.count():
+    train_iterator = train_stream.get_epoch_iterator()
+    valid_iterator = valid_stream.get_epoch_iterator()
+    last_hidden = h0_init
+    while True:
+        try:
+            lr_val = lib.floatX(LEARNING_RATE/(1. + LEARNING_RATE_DECAY*total_iters))
+            voc_audio_raw, mask_raw, text_features_raw, reset = next(train_iterator)
+            cost, last_hidden =  train_fn(text_features_raw, last_hidden, reset, mask_raw, voc_audio_raw, lr_val)
+            train_costs.append(cost)
+            total_iters += 1
+            if (total_iters % 1000) == 0:
+                print "Training NLL at epoch {}, iters {} is {:.4f}".format(
+                                epoch, total_iters, numpy.mean(train_costs[-100:])
+                            )
+        except StopIteration:
+            break
+
+    valid_cost_epoch = []
+    while True:
+        valid_iters.append(total_iters)
+        try:
+            voc_audio_raw, mask_raw, text_features_raw, reset = next(valid_iterator)
+            cost, last_hidden =  valid_fn(text_features_raw, last_hidden, reset, mask_raw, voc_audio_raw)
+            valid_cost_epoch.append(cost)
+        except StopIteration:
+            val_cost = numpy.mean(valid_cost_epoch)
+            print "Validation NLL at epoch {}, iters {} is {:.4f}".format(
+                epoch, total_iters, val_cost)
+            valid_costs.append(val_cost)
+            tag = "epoch_{}_val_score_{:.3f}".format(epoch, val_cost)
+            sampler(os.path.join(OUT_DIR, "samples", tag), "sample", False)
+            break
+
