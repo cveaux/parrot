@@ -1,12 +1,8 @@
 """
 Usage:
 THEANO_FLAGS=mode=FAST_RUN,device=gpu,floatX=float32 python -u vae.py --n_frames 50 \
---weight_norm True --skip_conn True --dim 1024 --n_rnn 3 --bidirectional False \
---rnn_type LSTM --learn_h0 False --batch_size 32 --kgmm 10 --dataset vctk
-"""
-
-"""
-TODO: There seems to be sime bug with GRU. Rectify it asap.
+--weight_norm True --skip_conn False --dim 512 --n_rnn 3 --bidirectional False \
+--rnn_type GRU --learn_h0 False --batch_size 8 --kgmm 20 --dataset vctk --ldim 64
 """
 
 import sys
@@ -111,6 +107,9 @@ def get_args():
     parser.add_argument('--grad_clip', help='Upper limit on gradient',
             type=lib.floatX, default = lib.floatX(1.))
 
+    parser.add_argument('--ldim', help='Latent Dimension. O for feedforward mode',
+            type=int, default = 0)
+
     parser.add_argument('--resume', help='Resume the same model from the last checkpoint.',\
             required=False, default=False, action='store_true')
 
@@ -136,7 +135,7 @@ FOLDER_PREFIX = '/Tmp/kumarkun/vocoder_vae'
 GRAD_CLIP = args.grad_clip
 LEARNING_RATE = args.lr
 
-LEARNING_RATE_DECAY = 5e-5
+LEARNING_RATE_DECAY = 2e-4
 
 N_FRAMES = args.n_frames # How many 'frames' to include in each truncated BPTT pass
 WEIGHT_NORM = args.weight_norm
@@ -147,6 +146,11 @@ BIDIRECTIONAL = args.bidirectional
 RNN_TYPE = args.rnn_type
 H0_MULT = 2 if RNN_TYPE == 'LSTM' else 1
 LEARN_H0 = args.learn_h0
+
+if args.ldim == 0:
+    LATENT_DIM = None
+else:
+    LATENT_DIM = args.ldim
 
 BATCH_SIZE = args.batch_size
 RESUME = args.resume
@@ -174,10 +178,16 @@ OUT_DIR = os.path.join(FOLDER_PREFIX, tag)
 if not os.path.exists(OUT_DIR):
     os.makedirs(OUT_DIR)
 
+def kl_unit_gaussian(mu, log_sigma):
+    """
+    KL divergence from a unit Gaussian prior
+    mean across axis 0 (minibatch), sum across all other axes
+    based on yaost, via Alec via Ishaan
+    """
+    return -0.5 * (1 + 2 * log_sigma - mu**2 - T.exp(2 * log_sigma))
 
 
-
-def Encoder(speech, h0):
+def Encoder(speech, h0, mask):
     """
     Create inference model to infer one single latent variable using bidirectional GRU \
     followed by non-causal dilated convolutions
@@ -190,7 +200,7 @@ def Encoder(speech, h0):
                                                    speech,
                                                    h0=h0,
                                                    weightnorm=WEIGHT_NORM,
-                                                   skip_conn=SKIP_CONN)
+                                                   skip_conn=False)
     elif RNN_TYPE == 'LSTM':
         rnns_out, last_hidden = lib.ops.stackedLSTM('Encoder.LSTM',
                                                     N_RNN,
@@ -199,9 +209,12 @@ def Encoder(speech, h0):
                                                     speech,
                                                     h0=h0,
                                                     weightnorm=WEIGHT_NORM,
-                                                    skip_conn=SKIP_CONN)
+                                                    skip_conn=False)
 
-    output1 = T.nnet.relu(rnns_out.mean(axis = 1))
+    rnns_out = rnns_out*mask[:,:,None]
+
+    rnns_out = rnns_out.sum(axis = 1)/(mask.sum(axis = 1)[:,None] + lib.floatX(EPS))
+    output1 = T.nnet.relu(rnns_out)
 
 
     output2 = lib.ops.Linear(
@@ -227,9 +240,9 @@ def Encoder(speech, h0):
     mu = output4[:,::2]
     log_sigma = output4[:,1::2]
 
-    return mu, log_sigma
+    return mu, log_sigma, last_hidden
 
-def decoder(latent_var, text_features, h0, reset):
+def Decoder(latent_var, text_features, h0, reset):
     """
     TODO: Change it to use latent varibales
     For now, only use text text features
@@ -246,7 +259,7 @@ def decoder(latent_var, text_features, h0, reset):
 
     if latent_var is not None:
         latent_var_repeated = T.extra_ops.repeat(latent_var[:,None,:], text_features.shape[1], axis = 1)
-        features = T.concatenate([text_features, latent_var], axis = 1)
+        features = T.concatenate([text_features, latent_var_repeated], axis = 2)
         RNN_INPUT_DIM = INPUT_DIM + LATENT_DIM
     else:
         RNN_INPUT_DIM = INPUT_DIM
@@ -269,7 +282,9 @@ def decoder(latent_var, text_features, h0, reset):
                                                     features,
                                                     h0=h0,
                                                     weightnorm=WEIGHT_NORM,
-                                                    skip_conn=SKIP_CONN)
+                                                    skip_conn=SKIP_CONN,
+                                                    use_input_every_layer = True)
+
     output1 = T.nnet.relu(rnns_out)
 
 
@@ -317,21 +332,34 @@ text_features     = text_features_raw.dimshuffle(1,0,2)
 vocoder_audio_raw = T.tensor3('vocoder_audio_raw') # shape (time-steps, batch, VOCODER_DIM)
 vocoder_audio     = vocoder_audio_raw.dimshuffle(1,0,2)
 
-h0        = T.tensor3('h0')
+h0_enc        = T.tensor3('h0_enc')
+h0_dec        = T.tensor3('h0_dec')
+
 reset     = T.iscalar('reset')
 lr        = T.scalar('lr')
 
 mask_raw      = T.matrix('mask_raw') # shape (time-steps, batch)
 mask = mask_raw.dimshuffle(1,0)
 
+if LATENT_DIM is not None:
+    mu_enc, log_sigma_enc, last_hidden_enc = Encoder(vocoder_audio, h0_enc, mask)
+    sigma_enc = T.exp(log_sigma_enc) + lib.floatX(EPS)
 
-mu, sigma, weights, last_hidden = decoder(None, text_features, h0, reset)
+    eps = T.cast(theano_rng.normal(mu_enc.shape), theano.config.floatX)
+
+    latents = mu_enc + eps*sigma_enc
+    kl_cost = kl_unit_gaussian(mu_enc, log_sigma_enc).sum(axis = 1).mean()
+else:
+    latents = None
+    kl_cost = 0.
+
+mu, sigma, weights, last_hidden_dec = Decoder(latents, text_features, h0_dec, reset)
 
 samples = sample_gmm(mu, sigma, weights, theano_rng)
 
 cost_raw = cost_gmm(vocoder_audio, mu, sigma, weights)
 
-cost = T.sum(cost_raw * mask)/(mask.sum() + 1e-5)
+cost = T.sum(cost_raw * mask)/(mask.sum() + lib.floatX(EPS)) + kl_cost
 
 params = lib.get_params(cost, lambda x: hasattr(x, 'param') and x.param==True)
 lib.print_params_info(params, path=FOLDER_PREFIX)
@@ -341,22 +369,51 @@ grads = [T.clip(g, lib.floatX(-GRAD_CLIP), lib.floatX(GRAD_CLIP)) for g in grads
 
 updates = lasagne.updates.adam(grads, params, learning_rate=lr)
 
+if LATENT_DIM is None:
+    train_fn = theano.function(
+        [text_features_raw, h0_dec, reset, mask_raw, vocoder_audio_raw, lr],
+        [cost, last_hidden_dec],
+        updates = updates
+    )
 
-train_fn = theano.function(
-    [text_features_raw, h0, reset, mask_raw, vocoder_audio_raw, lr],
-    [cost, last_hidden],
-    updates = updates
-)
+    valid_fn = theano.function(
+        [text_features_raw, h0_dec, reset, mask_raw, vocoder_audio_raw],
+        [cost, last_hidden_dec]
+    )
 
-valid_fn = theano.function(
-    [text_features_raw, h0, reset, mask_raw, vocoder_audio_raw],
-    [cost, last_hidden]
-)
+    sample_fn = theano.function(
+        [text_features_raw, h0_dec, reset],
+        [samples, last_hidden_dec]
+    )
+else:
+    train_fn = theano.function(
+        [text_features_raw, h0_dec, h0_enc, reset, mask_raw, vocoder_audio_raw, lr],
+        [cost, last_hidden_dec, last_hidden_enc],
+        updates = updates
+    )
 
-sample_fn = theano.function(
-    [text_features_raw, h0, reset],
-    [samples, last_hidden]
-)
+    valid_fn = theano.function(
+        [text_features_raw, h0_dec, h0_enc, reset, mask_raw, vocoder_audio_raw],
+        [cost, last_hidden_dec, last_hidden_enc]
+    )
+
+    latents_gen = T.matrix('latent_gen')
+
+    mu_gen, sigma_gen, weights_gen, last_hidden_dec_gen = Decoder(
+                                        latents_gen, text_features, h0_dec, reset)
+    samples_gen = sample_gmm(mu_gen, sigma_gen, weights_gen, theano_rng)
+
+    sample_fn_temp = theano.function(
+        [text_features_raw, latents_gen, h0_dec, reset],
+        [samples_gen, last_hidden_dec_gen]
+    )
+
+    def sample_fn(text_features_raw_, h0_dec_, reset_):
+        latents_generated = numpy.random.normal(
+            size= (text_features_raw_.shape[1], LATENT_DIM)
+            ).astype(theano.config.floatX)
+
+        return sample_fn_temp(text_features_raw_, latents_generated, h0_dec_, reset_)
 
 
 h0_init = lib.floatX(numpy.zeros((BATCH_SIZE, N_RNN, H0_MULT*DIM)))
@@ -372,18 +429,18 @@ def sampler(save_dir, samples_name, do_post_filtering):
 
     test_iterator = test_stream.get_epoch_iterator()
 
-    last_hidden = h0_init
+    last_hidden_dec = h0_init
 
     actual_so_far_raw, mask_raw, text_features_raw, reset = next(test_iterator)
 
-    samples_so_far, last_hidden = sample_fn(text_features_raw, last_hidden, reset)
+    samples_so_far, last_hidden_dec = sample_fn(text_features_raw, last_hidden_dec, reset)
 
     mask_so_far = mask_raw
 
     actual_so_far_next_raw, mask_raw, text_features_raw, reset = next(test_iterator)
 
     while reset != 1 :
-        samples_next, last_hidden = sample_fn(text_features_raw, last_hidden, reset)
+        samples_next, last_hidden_dec = sample_fn(text_features_raw, last_hidden_dec, reset)
 
         samples_so_far = numpy.concatenate((samples_so_far, samples_next), axis = 1)
         actual_so_far_raw = numpy.concatenate((actual_so_far_raw, actual_so_far_next_raw), axis = 0)
@@ -405,6 +462,10 @@ def sampler(save_dir, samples_name, do_post_filtering):
     if not os.path.exists(os.path.join(save_dir, 'actual_samples')):
         os.makedirs(os.path.join(save_dir, 'actual_samples'))
 
+    """
+    TODO: Remove this commented section.
+
+    """
     for i, this_sample in enumerate(actual_so_far):
         this_sample = this_sample[:int(mask_so_far.sum(axis=0)[i])]
 
@@ -416,7 +477,7 @@ def sampler(save_dir, samples_name, do_post_filtering):
             world_dir = WORLD_DIR,
             norm_info_file = norm_info_file,
             do_post_filtering = do_post_filtering)
-
+    
 
     for i, this_sample in enumerate(samples_so_far):
         this_sample = this_sample[:int(mask_so_far.sum(axis=0)[i])]
@@ -461,12 +522,24 @@ print "Training"
 for epoch in itertools.count():
     train_iterator = train_stream.get_epoch_iterator()
     valid_iterator = valid_stream.get_epoch_iterator()
-    last_hidden = h0_init
+    last_hidden_dec = h0_init
+    last_hidden_enc = h0_init
     while True:
         try:
             lr_val = lib.floatX(LEARNING_RATE/(1. + LEARNING_RATE_DECAY*total_iters))
             voc_audio_raw, mask_raw, text_features_raw, reset = next(train_iterator)
-            cost, last_hidden =  train_fn(text_features_raw, last_hidden, reset, mask_raw, voc_audio_raw, lr_val)
+            
+            if LATENT_DIM is None:
+                cost, last_hidden_dec =  train_fn(
+                            text_features_raw, last_hidden_dec,
+                            reset, mask_raw, voc_audio_raw, lr_val
+                        )
+            else:
+                cost, last_hidden_dec, last_hidden_enc =  train_fn(
+                            text_features_raw, last_hidden_dec, last_hidden_enc,
+                            reset, mask_raw, voc_audio_raw, lr_val
+                        )
+
             train_costs.append(cost)
             total_iters += 1
             if (total_iters % 1000) == 0:
@@ -481,7 +554,18 @@ for epoch in itertools.count():
         valid_iters.append(total_iters)
         try:
             voc_audio_raw, mask_raw, text_features_raw, reset = next(valid_iterator)
-            cost, last_hidden =  valid_fn(text_features_raw, last_hidden, reset, mask_raw, voc_audio_raw)
+
+            if LATENT_DIM is None:
+                cost, last_hidden_dec =  valid_fn(
+                            text_features_raw, last_hidden_dec,
+                            reset, mask_raw, voc_audio_raw
+                        )
+            else:
+                cost, last_hidden_dec, last_hidden_enc =  valid_fn(
+                            text_features_raw, last_hidden_dec, last_hidden_enc,
+                            reset, mask_raw, voc_audio_raw
+                        )
+
             valid_cost_epoch.append(cost)
         except StopIteration:
             val_cost = numpy.mean(valid_cost_epoch)
