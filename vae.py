@@ -2,7 +2,7 @@
 Usage:
 THEANO_FLAGS=mode=FAST_RUN,device=gpu,floatX=float32 python -u vae.py --n_frames 50 \
 --weight_norm True --skip_conn False --dim 512 --n_rnn 3 --bidirectional False \
---rnn_type GRU --learn_h0 False --batch_size 8 --kgmm 20 --dataset vctk --ldim 64
+--rnn_type GRU --learn_h0 False --batch_size 8 --kgmm 20 --dataset vctk --ldim 64 --loss MSE
 """
 
 import sys
@@ -110,6 +110,9 @@ def get_args():
     parser.add_argument('--ldim', help='Latent Dimension. O for feedforward mode',
             type=int, default = 0)
 
+    parser.add_argument('--loss', help='Loss to use',
+            type=str, default = "MSE")
+
     parser.add_argument('--resume', help='Resume the same model from the last checkpoint.',\
             required=False, default=False, action='store_true')
 
@@ -147,6 +150,10 @@ RNN_TYPE = args.rnn_type
 H0_MULT = 2 if RNN_TYPE == 'LSTM' else 1
 LEARN_H0 = args.learn_h0
 
+LOSS = args.loss
+
+NUM_REPEAT = 6
+
 if args.ldim == 0:
     LATENT_DIM = None
 else:
@@ -158,6 +165,8 @@ EPS = 1e-5
 VOCODER_DIM = 63
 INPUT_DIM = 420
 OUTPUT_DIM = VOCODER_DIM
+
+SAMPLING_BIAS = 5.
 
 K_GMM = args.kgmm
 
@@ -242,6 +251,23 @@ def Encoder(speech, h0, mask):
 
     return mu, log_sigma, last_hidden
 
+def split_output(output, sampling_bias = 0.):
+    mu_raw = output[:,:,:OUTPUT_DIM*K_GMM]
+
+    mu = T.clip(mu_raw, lib.floatX(-6.), lib.floatX(6.))
+
+    log_sig = output[:,:,OUTPUT_DIM*K_GMM : 2*OUTPUT_DIM*K_GMM]
+
+    sig = T.exp(log_sig - sampling_bias) + lib.floatX(EPS)
+
+    # sig = T.clip(sig, , lib.floatX(2.))
+
+    weights_raw = output[:,:,-K_GMM:]
+    weights = T.nnet.softmax(weights_raw.reshape((-1, K_GMM))*( 1. + sampling_bias)).reshape(weights_raw.shape) + lib.floatX(EPS)
+
+    return mu, sig, weights, last_hidden
+
+
 def Decoder(latent_var, text_features, h0, reset):
     """
     TODO: Change it to use latent varibales
@@ -298,30 +324,29 @@ def Decoder(latent_var, text_features, h0, reset):
 
     output3 = T.nnet.relu(output2)
 
-    output = lib.ops.Linear(
-        'Decoder.Output2',
-        DIM,
-        (2* OUTPUT_DIM + 1)*K_GMM,
-        output3,
-        initialization='he',
-        weightnorm=WEIGHT_NORM
-    )
+    if LOSS == 'GMM':
 
-
-    mu_raw = output[:,:,:OUTPUT_DIM*K_GMM]
-
-    mu = T.clip(mu_raw, lib.floatX(-6.), lib.floatX(6.))
-
-    log_sig = output[:,:,OUTPUT_DIM*K_GMM : 2*OUTPUT_DIM*K_GMM]
-
-    sig = T.exp(log_sig) + lib.floatX(EPS)
-
-    # sig = T.clip(sig, , lib.floatX(2.))
-
-    weights_raw = output[:,:,-K_GMM:]
-    weights = T.nnet.softmax(weights_raw.reshape((-1, K_GMM))).reshape(weights_raw.shape) + lib.floatX(EPS)
-
-    return mu, sig, weights, last_hidden
+        output = lib.ops.Linear(
+            'Decoder.Output2',
+            DIM,
+            (2* OUTPUT_DIM + 1)*K_GMM,
+            output3,
+            initialization='he',
+            weightnorm=WEIGHT_NORM
+        )
+        return output, last_hidden
+    elif LOSS == 'MSE':
+        output = lib.ops.Linear(
+            'Decoder.Output2',
+            DIM,
+            OUTPUT_DIM,
+            output3,
+            initialization='he',
+            weightnorm=WEIGHT_NORM
+        )
+        return output, last_hidden
+    else:
+        raise NotImplementedError("{} is not implemented.".format(LOSS))
 
 
 
@@ -353,13 +378,26 @@ else:
     latents = None
     kl_cost = 0.
 
-mu, sigma, weights, last_hidden_dec = Decoder(latents, text_features, h0_dec, reset)
+output, last_hidden_dec = Decoder(latents, text_features, h0_dec, reset)
 
-samples = sample_gmm(mu, sigma, weights, theano_rng)
+if LOSS == "GMM":
+    mu, sigma, weights = split_output(output)
 
-cost_raw = cost_gmm(vocoder_audio, mu, sigma, weights)
+    if SAMPLING_BIAS is not None:
+        mu_s, sigma_s, weight_s = split_output(output, 5.)
+        samples = sample_gmm(mu_s, sigma_s, weight_s, theano_rng)
+    else:
+        samples = sample_gmm(mu, sigma, weight, theano_rng)
 
-cost = T.sum(cost_raw * mask)/(mask.sum() + lib.floatX(EPS)) + kl_cost
+    cost_raw = cost_gmm(vocoder_audio, mu, sigma, weights)
+elif LOSS == "MSE":
+    samples = output
+    cost_raw = T.sum((samples - vocoder_audio) ** 2, axis=-1)
+else:
+    raise NotImplementedError("{} is not implemented.".format(LOSS))
+
+
+cost = T.sum(cost_raw * mask)/(mask.sum() + lib.floatX(EPS)) + 0.1*kl_cost
 
 params = lib.get_params(cost, lambda x: hasattr(x, 'param') and x.param==True)
 lib.print_params_info(params, path=FOLDER_PREFIX)
@@ -388,31 +426,36 @@ if LATENT_DIM is None:
 else:
     train_fn = theano.function(
         [text_features_raw, h0_dec, h0_enc, reset, mask_raw, vocoder_audio_raw, lr],
-        [cost, last_hidden_dec, last_hidden_enc],
+        [cost, last_hidden_dec, last_hidden_enc, kl_cost],
         updates = updates
     )
 
     valid_fn = theano.function(
         [text_features_raw, h0_dec, h0_enc, reset, mask_raw, vocoder_audio_raw],
-        [cost, last_hidden_dec, last_hidden_enc]
+        [cost, last_hidden_dec, last_hidden_enc, kl_cost]
     )
 
     latents_gen = T.matrix('latent_gen')
 
-    mu_gen, sigma_gen, weights_gen, last_hidden_dec_gen = Decoder(
-                                        latents_gen, text_features, h0_dec, reset)
-    samples_gen = sample_gmm(mu_gen, sigma_gen, weights_gen, theano_rng)
+    output_gen, last_hidden_dec_gen = Decoder(
+                                            latents_gen, text_features, h0_dec, reset)
+
+    if LOSS == "GMM":
+        if SAMPLING_BIAS is not None:
+            mu_gen, sigma_gen, weights_gen = split_output(output, sampling_bias = SAMPLING_BIAS)
+        else:
+            mu_gen, sigma_gen, weights_gen = split_output(output)
+
+        samples_gen = sample_gmm(mu_gen, sigma_gen, weights_gen, theano_rng)
+    elif LOSS == "MSE":
+        samples_gen = output_gen
 
     sample_fn_temp = theano.function(
         [text_features_raw, latents_gen, h0_dec, reset],
         [samples_gen, last_hidden_dec_gen]
     )
 
-    def sample_fn(text_features_raw_, h0_dec_, reset_):
-        latents_generated = numpy.random.normal(
-            size= (text_features_raw_.shape[1], LATENT_DIM)
-            ).astype(theano.config.floatX)
-
+    def sample_fn(text_features_raw_, latents_generated, h0_dec_, reset_):
         return sample_fn_temp(text_features_raw_, latents_generated, h0_dec_, reset_)
 
 
@@ -429,18 +472,34 @@ def sampler(save_dir, samples_name, do_post_filtering):
 
     test_iterator = test_stream.get_epoch_iterator()
 
-    last_hidden_dec = h0_init
+    last_hidden_dec = lib.floatX(numpy.zeros((BATCH_SIZE*NUM_REPEAT, N_RNN, H0_MULT*DIM)))
+
+    if LATENT_DIM is not None:
+        latents_generated = numpy.random.normal(size=(NUM_REPEAT, LATENT_DIM))
+
+        latents_generated = lib.floatX(numpy.tile(latents_generated, (BATCH_SIZE, 1)))
 
     actual_so_far_raw, mask_raw, text_features_raw, reset = next(test_iterator)
 
-    samples_so_far, last_hidden_dec = sample_fn(text_features_raw, last_hidden_dec, reset)
+    text_features_raw_repeated = numpy.repeat(text_features_raw, NUM_REPEAT, axis = 1)
+
+
+    if LATENT_DIM is None:
+        samples_so_far, last_hidden_dec = sample_fn(text_features_raw_repeated, last_hidden_dec, reset)
+    else:
+        samples_so_far, last_hidden_dec = sample_fn(text_features_raw_repeated, latents_generated, last_hidden_dec, reset)
 
     mask_so_far = mask_raw
 
     actual_so_far_next_raw, mask_raw, text_features_raw, reset = next(test_iterator)
 
+    text_features_raw_repeated = numpy.repeat(text_features_raw, NUM_REPEAT, axis = 1)
+
     while reset != 1 :
-        samples_next, last_hidden_dec = sample_fn(text_features_raw, last_hidden_dec, reset)
+        if LATENT_DIM is None:
+            samples_next, last_hidden_dec = sample_fn(text_features_raw_repeated, last_hidden_dec, reset)
+        else:
+            samples_next, last_hidden_dec = sample_fn(text_features_raw_repeated, latents_generated, last_hidden_dec, reset)
 
         samples_so_far = numpy.concatenate((samples_so_far, samples_next), axis = 1)
         actual_so_far_raw = numpy.concatenate((actual_so_far_raw, actual_so_far_next_raw), axis = 0)
@@ -448,9 +507,11 @@ def sampler(save_dir, samples_name, do_post_filtering):
         actual_so_far_next_raw, mask_raw, text_features_raw, reset = next(test_iterator)
 
         mask_so_far = numpy.concatenate((mask_so_far, mask_raw), axis = 0)
+        text_features_raw_repeated = numpy.repeat(text_features_raw, NUM_REPEAT, axis = 1)
 
     actual_so_far = actual_so_far_raw.transpose((1,0,2))
 
+    mask_so_far_repeated = numpy.repeat(mask_so_far, NUM_REPEAT, axis = 1)
 
     norm_info_file = os.path.join(
         data_dir, DATASET,
@@ -466,6 +527,7 @@ def sampler(save_dir, samples_name, do_post_filtering):
     TODO: Remove this commented section.
 
     """
+
     for i, this_sample in enumerate(actual_so_far):
         this_sample = this_sample[:int(mask_so_far.sum(axis=0)[i])]
 
@@ -480,16 +542,18 @@ def sampler(save_dir, samples_name, do_post_filtering):
     
 
     for i, this_sample in enumerate(samples_so_far):
-        this_sample = this_sample[:int(mask_so_far.sum(axis=0)[i])]
+        this_sample = this_sample[:int(mask_so_far_repeated.sum(axis=0)[i])]
 
         generate_wav(
             this_sample,
             os.path.join(save_dir, 'samples'),
-            samples_name + '_' + str(i),
+            samples_name + '_' + str(i//NUM_REPEAT) + '_latent_' + str(i % NUM_REPEAT),
             sptk_dir = SPTK_DIR,
             world_dir = WORLD_DIR,
             norm_info_file = norm_info_file,
             do_post_filtering = do_post_filtering)
+
+# sampler(os.path.join(OUT_DIR, "samples", "initial_samples"), "sample", False)
 
 
 train_stream = datasets.parrot_stream(
@@ -517,13 +581,19 @@ valid_costs = []
 
 valid_iters = []
 
+
+
 print "Training"
 
 for epoch in itertools.count():
+
     train_iterator = train_stream.get_epoch_iterator()
     valid_iterator = valid_stream.get_epoch_iterator()
     last_hidden_dec = h0_init
     last_hidden_enc = h0_init
+    KL_costs_train_epoch = []
+    KL_costs_valid_epoch = []
+
     while True:
         try:
             lr_val = lib.floatX(LEARNING_RATE/(1. + LEARNING_RATE_DECAY*total_iters))
@@ -535,17 +605,21 @@ for epoch in itertools.count():
                             reset, mask_raw, voc_audio_raw, lr_val
                         )
             else:
-                cost, last_hidden_dec, last_hidden_enc =  train_fn(
+                cost, last_hidden_dec, last_hidden_enc, kl_cost =  train_fn(
                             text_features_raw, last_hidden_dec, last_hidden_enc,
                             reset, mask_raw, voc_audio_raw, lr_val
                         )
+                KL_costs_train_epoch.append(kl_cost)
 
             train_costs.append(cost)
             total_iters += 1
             if (total_iters % 1000) == 0:
                 print "Training NLL at epoch {}, iters {} is {:.4f}".format(
-                                epoch, total_iters, numpy.mean(train_costs[-100:])
+                                epoch, total_iters, numpy.mean(train_costs[-1000:])
                             )
+                if len(KL_costs_train_epoch) > 0:
+                    print "Training KL cost is {:.4f}".format(numpy.mean(KL_costs_train_epoch[-1000:]))
+
         except StopIteration:
             break
 
@@ -561,16 +635,20 @@ for epoch in itertools.count():
                             reset, mask_raw, voc_audio_raw
                         )
             else:
-                cost, last_hidden_dec, last_hidden_enc =  valid_fn(
+                cost, last_hidden_dec, last_hidden_enc, kl_cost =  valid_fn(
                             text_features_raw, last_hidden_dec, last_hidden_enc,
                             reset, mask_raw, voc_audio_raw
                         )
+                KL_costs_valid_epoch.append(kl_cost)
 
             valid_cost_epoch.append(cost)
         except StopIteration:
             val_cost = numpy.mean(valid_cost_epoch)
             print "Validation NLL at epoch {}, iters {} is {:.4f}".format(
                 epoch, total_iters, val_cost)
+
+            if len(KL_costs_valid_epoch) > 0:
+                print "Validation KL cost is {:.4f}".format(numpy.mean(KL_costs_valid_epoch))
             valid_costs.append(val_cost)
             tag = "epoch_{}_val_score_{:.3f}".format(epoch, val_cost)
             sampler(os.path.join(OUT_DIR, "samples", tag), "sample", False)
