@@ -1,11 +1,11 @@
 from blocks.bricks import (
     Initializable, Linear, Random)
-from blocks.bricks.base import application
+from blocks.bricks.base import lazy, application
 from blocks.bricks.lookup import LookupTable
 from blocks.bricks.parallel import Fork
-from blocks.bricks.recurrent import GatedRecurrent
+from blocks.bricks.recurrent import GatedRecurrent, Bidirectional
 from blocks.roles import add_role, INITIAL_STATE
-from blocks.utils import shared_floatx_zeros
+from blocks.utils import shared_floatx_zeros, dict_union
 
 import numpy
 
@@ -112,6 +112,84 @@ def sample_gmm(mu, sigma, weight, theano_rng):
     return result.reshape(shape_result, ndim=ndim_result)
 
 
+class RecurrentWithFork(Initializable):
+    # Obtained from Dima's code. @rizar
+    # https://github.com/rizar/attention-lvcsr/blob/master/lvsr/bricks/__init__.py
+    @lazy(allocation=['input_dim'])
+    def __init__(self, recurrent, input_dim, **kwargs):
+        super(RecurrentWithFork, self).__init__(**kwargs)
+        self.recurrent = recurrent
+        self.input_dim = input_dim
+        self.fork = Fork(
+            [name for name in self.recurrent.sequences
+             if name != 'mask'], prototype=Linear())
+        self.children = [recurrent.brick, self.fork]
+
+    def _push_allocation_config(self):
+        self.fork.input_dim = self.input_dim
+        self.fork.output_dims = [self.recurrent.brick.get_dim(name)
+                                 for name in self.fork.output_names]
+
+    @application(inputs=['input_', 'mask'])
+    def apply(self, input_, mask=None, **kwargs):
+        return self.recurrent(
+            mask=mask, **dict_union(self.fork.apply(input_, as_dict=True),
+                                    kwargs))
+
+    @apply.property('outputs')
+    def apply_outputs(self):
+        return self.recurrent.states
+
+
+class Encoder(Initializable):
+    def __init__(
+            self,
+            encoder_type,
+            num_characters,
+            input_dim,
+            encoder_dim,
+            **kwargs):
+        assert encoder_type in [None, 'bidirectional']
+        self.encoder_type = encoder_type
+        super(Encoder, self).__init__(**kwargs)
+
+        self.children = []
+
+        if encoder_type in ['lookup', 'bidirectional']:
+            self.embed_label = LookupTable(
+                num_characters,
+                input_dim,
+                name='embed_label')
+            self.children += [
+                self.embed_label]
+        else:
+            # If there is no encoder.
+            assert num_characters == input_dim
+
+        if encoder_type == 'bidirectional':
+            transition = RecurrentWithFork(
+                GatedRecurrent(dim=encoder_dim).apply,
+                input_dim, name='encoder_transition')
+            self.encoder = Bidirectional(transition, name='encoder')
+            self.children.append(self.encoder)
+
+    @application
+    def apply(self, x, x_mask=None):
+        if self.encoder_type is None:
+            return x
+
+        if self.encoder_type in ['lookup', 'bidirectional']:
+            embed_x = self.embed_label.apply(x)
+
+        if self.encoder_type == 'lookup':
+            encoded_x = embed_x
+
+        if self.encoder_type == 'bidirectional':
+            encoded_x = self.encoder.apply(embed_x, x_mask)
+
+        return encoded_x
+
+
 class Parrot(Initializable, Random):
     def __init__(
             self,
@@ -133,7 +211,12 @@ class Parrot(Initializable, Random):
             epsilon=1e-5,  # Numerical stabilities
             num_characters=43,  # how many chars in the labels
             attention_type='graves',  # graves or softmax
-            attention_size=10,
+            attention_size=10,  # number of gaussians in the attention
+            attention_alignment=1.,  # audio steps per letter at initialization
+            sharpening_coeff=1.,
+            timing_coeff=1.,
+            encoder_type=None,
+            encoder_dim=128,
             **kwargs):
 
         super(Parrot, self).__init__(**kwargs)
@@ -152,13 +235,21 @@ class Parrot(Initializable, Random):
         self.full_feedback = full_feedback
         self.feedback_noise_level = feedback_noise_level
         self.epsilon = epsilon
-        attention_alignment = 1.
 
         self.num_characters = num_characters
-
         self.attention_type = attention_type
         self.attention_alignment = attention_alignment
         self.attention_size = attention_size
+        self.sharpening_coeff = sharpening_coeff
+        self.timing_coeff = timing_coeff
+
+        self.encoder_type = encoder_type
+        self.encoder_dim = encoder_dim
+
+        self.encoded_input_dim = input_dim
+
+        if self.encoder_type == 'bidirectional':
+            self.encoded_input_dim = 2 * encoder_dim
 
         assert labels_type in [
             'full_labels', 'phonemes', 'unconditional', 'unaligned']
@@ -217,7 +308,15 @@ class Parrot(Initializable, Random):
                 output_dims=[output_dim * k_gmm, output_dim * k_gmm, k_gmm],
                 name='readout_to_output')
 
+        self.encoder = Encoder(
+            encoder_type,
+            num_characters,
+            input_dim,
+            encoder_dim,
+            name='encoder')
+
         self.children = [
+            self.encoder,
             self.rnn1,
             self.rnn2,
             self.rnn3,
@@ -232,19 +331,19 @@ class Parrot(Initializable, Random):
         if labels_type != 'unconditional':
             self.inp_to_h1 = Fork(
                 output_names=['rnn1_inputs', 'rnn1_gates'],
-                input_dim=input_dim,
+                input_dim=self.encoded_input_dim,
                 output_dims=[rnn_h_dim, 2 * rnn_h_dim],
                 name='inp_to_h1')
 
             self.inp_to_h2 = Fork(
                 output_names=['rnn2_inputs', 'rnn2_gates'],
-                input_dim=input_dim,
+                input_dim=self.encoded_input_dim,
                 output_dims=[rnn_h_dim, 2 * rnn_h_dim],
                 name='inp_to_h2')
 
             self.inp_to_h3 = Fork(
                 output_names=['rnn3_inputs', 'rnn3_gates'],
-                input_dim=input_dim,
+                input_dim=self.encoded_input_dim,
                 output_dims=[rnn_h_dim, 2 * rnn_h_dim],
                 name='inp_to_h3')
 
@@ -256,13 +355,13 @@ class Parrot(Initializable, Random):
             if labels_type == 'phonemes':
                 self.embed_label = LookupTable(
                     num_characters,
-                    input_dim,
+                    self.encoded_input_dim,
                     name='embed_label')
                 self.children += [
                     self.embed_label]
 
             if labels_type == 'unaligned':
-                assert num_characters == input_dim
+                # assert num_characters == input_dim
 
                 self.h1_to_att = Fork(
                     output_names=['alpha', 'beta', 'kappa'],
@@ -271,7 +370,7 @@ class Parrot(Initializable, Random):
                     name='h1_to_att')
 
                 self.att_to_readout = Linear(
-                    input_dim=num_characters,
+                    input_dim=self.encoded_input_dim,
                     output_dim=readouts_dim,
                     name='att_to_readout')
 
@@ -358,7 +457,7 @@ class Parrot(Initializable, Random):
 
     def _allocate(self):
         self.initial_w = shared_floatx_zeros(
-            (self.num_characters,), name="initial_w")
+            (self.encoded_input_dim,), name="initial_w")
 
         add_role(self.initial_w, INITIAL_STATE)
 
@@ -407,11 +506,11 @@ class Parrot(Initializable, Random):
         # Trainabla initial state for w. Why not for k?
         if self.labels_type != 'unaligned':
             initial_w = tensor.zeros(
-                (batch_size, self.num_characters), dtype=floatX)
+                (batch_size, self.encoded_input_dim), dtype=floatX)
         else:
             initial_w = tensor.repeat(self.initial_w[None, :], batch_size, 0)
 
-        last_w = shared_floatx_zeros((batch_size, self.num_characters))
+        last_w = shared_floatx_zeros((batch_size, self.encoded_input_dim))
 
         return initial_h1, last_h1, initial_h2, last_h2, initial_h3, last_h3, \
             initial_w, last_w, initial_k, last_k
@@ -540,15 +639,19 @@ class Parrot(Initializable, Random):
 
         if self.labels_type == 'unaligned':
             # TODO: include context_oh as context in the step function.
-            context_oh = one_hot(labels, self.num_characters) * \
-                tensor.shape_padright(labels_mask)
+            if self.encoder_type is None:
+                context_oh = one_hot(labels, self.num_characters) * \
+                    tensor.shape_padright(labels_mask)
+            elif self.encoder_type == 'bidirectional':
+                context_oh = self.encoder.apply(labels) * \
+                    tensor.shape_padright(labels_mask)
 
             u = tensor.shape_padleft(
                 tensor.arange(labels.shape[1], dtype=floatX), 2)
 
         def step(
                 inp_h1_t, gat_h1_t, inp_h2_t, gat_h2_t, inp_h3_t, gat_h3_t,
-                h1_tm1, h2_tm1, h3_tm1, k_tm1, w_tm1):
+                h1_tm1, h2_tm1, h3_tm1, k_tm1, w_tm1, context_oh):
 
             if self.labels_type == 'unaligned':
                 attinp_h1, attgat_h1 = self.inp_to_h1.apply(w_tm1)
@@ -571,6 +674,7 @@ class Parrot(Initializable, Random):
                 b_t = tensor.exp(b_t) + self.epsilon
                 k_t = k_tm1 + self.attention_alignment * tensor.exp(k_t)
 
+                a_t_ = a_t
                 a_t = tensor.shape_padright(a_t)
                 b_t = tensor.shape_padright(b_t)
                 k_t_ = tensor.shape_padright(k_t)
@@ -597,6 +701,8 @@ class Parrot(Initializable, Random):
             else:
                 k_t = k_tm1
                 w_t = w_tm1
+                a_t_ = k_tm1
+                phi_t = k_tm1
 
             h1inp_h2, h1gat_h2 = self.h1_to_h2.apply(h1_t)
             h1inp_h3, h1gat_h3 = self.h1_to_h3.apply(h1_t)
@@ -623,18 +729,20 @@ class Parrot(Initializable, Random):
                 gat_h3_t + h1gat_h3 + h2gat_h3,
                 h3_tm1, iterate=False)
 
-            return h1_t, h2_t, h3_t, k_t, w_t
+            return h1_t, h2_t, h3_t, k_t, w_t, phi_t, a_t_
 
-        (h1, h2, h3, k, w), scan_updates = theano.scan(
+        (h1, h2, h3, k, w, phi, pi_att), scan_updates = theano.scan(
             fn=step,
             sequences=[cell_h1, gat_h1, cell_h2, gat_h2, cell_h3, gat_h3],
-            non_sequences=[],
+            non_sequences=[context_oh],
             outputs_info=[
                 input_h1,
                 input_h2,
                 input_h3,
                 input_k,
-                input_w])
+                input_w,
+                None,
+                None])
 
         h1_out = self.h1_to_readout.apply(h1)
         h2_out = self.h2_to_readout.apply(h2)
@@ -660,6 +768,9 @@ class Parrot(Initializable, Random):
                 predicted += self.speaker_to_output.apply(emb_speaker)
             cost = tensor.sum((predicted - target_features) ** 2, axis=-1)
 
+            next_x = predicted
+            # Dummy value for coeff
+            coeff = predicted
         elif self.which_cost == 'GMM':
             mu, sigma, coeff = predicted
             if self.use_speaker:
@@ -668,14 +779,16 @@ class Parrot(Initializable, Random):
                 sigma += spk_to_out[1]
                 coeff += spk_to_out[2]
 
-            sigma = tensor.exp(sigma - self.sampling_bias) + self.epsilon
+            # When training there should not be sampling_bias
+            sigma = tensor.exp(sigma) + self.epsilon
 
             coeff = tensor.nnet.softmax(
                 coeff.reshape(
-                    (-1, self.k_gmm)) * (1. + self.sampling_bias)).reshape(
+                    (-1, self.k_gmm))).reshape(
                         coeff.shape) + self.epsilon
 
             cost = cost_gmm(target_features, mu, sigma, coeff)
+            next_x = sample_gmm(mu, sigma, coeff, self.theano_rng)
 
         cost = (cost * mask).sum() / (mask.sum() + 1e-5) + 0. * start_flag
 
@@ -688,7 +801,9 @@ class Parrot(Initializable, Random):
             updates.append((last_k, k[-1]))
             updates.append((last_w, w[-1]))
 
-        return cost, scan_updates + updates
+        attention_vars = [next_x, k, w, coeff, phi, pi_att]
+
+        return cost, scan_updates + updates, attention_vars
 
     @application
     def sample_model_fun(
@@ -765,8 +880,15 @@ class Parrot(Initializable, Random):
 
         if self.labels_type == 'unaligned':
             # TODO: include context_oh as context in the step function.
-            context_oh = one_hot(labels, self.num_characters) * \
-                tensor.shape_padright(labels_mask)
+            # batch_size * seq_length * num_characters
+
+            if self.encoder_type is None:
+                context_oh = one_hot(labels, self.num_characters) * \
+                    tensor.shape_padright(labels_mask)
+            elif self.encoder_type == 'bidirectional':
+                context_oh = self.encoder.apply(labels) * \
+                    tensor.shape_padright(labels_mask)
+
             u = tensor.shape_padleft(
                 tensor.arange(labels.shape[1], dtype=floatX), 2)
 
@@ -828,8 +950,9 @@ class Parrot(Initializable, Random):
                 else:
                     a_t = tensor.exp(a_t) + self.epsilon
 
-                b_t = tensor.exp(b_t) + self.epsilon
-                k_t = k_tm1 + self.attention_alignment * tensor.exp(k_t)
+                b_t = tensor.exp(b_t) * self.sharpening_coeff + self.epsilon
+                k_t = k_tm1 + self.attention_alignment * \
+                    tensor.exp(k_t) / self.timing_coeff
 
                 a_t_ = a_t
                 a_t = tensor.shape_padright(a_t)
@@ -986,4 +1109,32 @@ class Parrot(Initializable, Random):
         return function(
             theano_inputs,
             [sample_x, k, w, pi, phi, pi_att],
+            updates=updates)(*numpy_inputs)
+
+    def sample_using_input(self, data_tr, num_samples):
+        # Used to predict the values using the dataset
+
+        features, features_mask, labels, labels_mask, speaker, start_flag = \
+            self.symbolic_input_variables()
+
+        cost, updates, attention_vars = self.compute_cost(
+            features, features_mask, labels, labels_mask,
+            speaker, start_flag, num_samples)
+        sample_x, k, w, pi, phi, pi_att = attention_vars
+
+        theano_vars = [
+            features, features_mask, labels, labels_mask, speaker, start_flag]
+        theano_vars = [x for x in theano_vars if x is not None]
+        theano_vars = list(set(theano_vars))
+        theano_vars = {x.name: x for x in theano_vars}
+
+        theano_inputs = []
+        numpy_inputs = []
+
+        for key in data_tr.keys():
+            theano_inputs.append(theano_vars[key])
+            numpy_inputs.append(data_tr[key])
+
+        return function(
+            theano_inputs, [sample_x, k, w, pi, phi, pi_att],
             updates=updates)(*numpy_inputs)

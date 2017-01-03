@@ -74,6 +74,8 @@ parrot_args = {
     'which_cost': args.which_cost,
     'num_characters': args.num_characters,
     'attention_type': args.attention_type,
+    'attention_alignment': args.attention_alignment,
+    'encoder_type': args.encoder_type,
     'weights_init': w_init,
     'biases_init': b_init,
     'name': 'parrot'}
@@ -84,7 +86,7 @@ parrot.initialize()
 features, features_mask, labels, labels_mask, speaker, start_flag = \
     parrot.symbolic_input_variables()
 
-cost, extra_updates = parrot.compute_cost(
+cost, extra_updates, attention_vars = parrot.compute_cost(
     features, features_mask, labels, labels_mask,
     speaker, start_flag, args.batch_size)
 
@@ -93,6 +95,23 @@ cost.name = cost_name
 
 cg = ComputationGraph(cost)
 model = Model(cost)
+
+gradients = None
+if args.adaptive_noise:
+    from graph import apply_adaptive_noise
+
+    cost, cg, gradients, noise_brick = \
+        apply_adaptive_noise(
+            computation_graph=cg,
+            cost=cost,
+            variables=cg.parameters,
+            num_examples=900,
+            parameters=model.get_parameter_dict().values())
+
+    model = Model(cost)
+    cost_name = 'nll'
+    cost.name = cost_name
+
 parameters = cg.parameters
 
 if args.algorithm == "adam":
@@ -105,14 +124,17 @@ algorithm = GradientDescent(
     cost=cost,
     parameters=parameters,
     step_rule=step_rule,
+    gradients=gradients,
     on_unused_sources='warn')
 algorithm.add_updates(extra_updates)
 
 monitoring_vars = [cost]
+plot_names = [['train_nll', 'valid_nll']]
 
 if args.lr_schedule:
     lr = algorithm.step_rule.components[1].learning_rate
     monitoring_vars.append(lr)
+    plot_names += [['valid_learning_rate']]
 
 train_monitor = TrainingDataMonitoring(
     variables=monitoring_vars,
@@ -156,7 +178,7 @@ if not worker or worker.is_main_worker:
             before_first_epoch=True),
         Plot(
             os.path.join(save_dir, "progress", exp_name + ".png"),
-            [['train_nll', 'valid_nll']],
+            plot_names,
             every_n_batches=args.save_every,
             email=False),
         Checkpoint(
