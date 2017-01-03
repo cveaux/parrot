@@ -189,6 +189,81 @@ class Encoder(Initializable):
 
         return encoded_x
 
+class LatentEncoder(Initializable):
+    def __init__(
+            self,
+            encoder_type,
+            input_dim,
+            rnn_h_dim,
+            latent_dim,
+            num_layers,
+            **kwargs):
+
+        assert encoder_type in ['unidirectional']
+
+        self.encoder_type = encoder_type
+
+        self.children = []
+
+        self.rnns = []
+        self.linear_transforms = []
+
+        for i in range(num_layers):
+            rnn_input_gates = Fork(
+                                    output_names=[
+                                            'latent_rnn_{}_inputs'.format(i+1),
+                                            'latent_rnn_{}_gates'.format(i+1)
+                                            ],
+                                    input_dim=rnn_h_dim if i != 0 else input_dim,
+                                    output_dims=[rnn_h_dim, 2 * rnn_h_dim],
+                                    name='latent_rnn_{}_to_{}'.format(i,i+1)
+                                )
+            rnn = GatedRecurrent(dim=latent_dim, name='latent_rnn_'.format(i+1))
+            
+            self.children.append(rnn_input_gates)
+            self.children.append(rnn)
+
+            self.rnns.append(rnn)
+            self.linear_transforms.append(rnn_input_gates)
+
+        mu_sig_fork = Fork(
+                            output_names=[
+                                    'latent_mu',
+                                    'latent_log_sig'
+                                    ],
+                            input_dim=rnn_h_dim,
+                            output_dims=[latent_dim, 2 * latent_dim],
+                            name='rnn_{}_to_mu_logsig'.format(num_layers)
+                        )
+
+        self.children.append(mu_sig_fork)
+
+        self.linear_transforms.appned(mu_sig_fork)
+
+        kwargs.setdefault('children', []).extend(self.children)
+
+        super(LatentEncoder, self).__init__(**kwargs)
+
+    def initial_states(self, batch_size):
+        
+        return [rnn.initial_states(batch_size) for rnn in self.rnns]
+
+
+    @application(inputs=['x'], outputs=["latent_mu", "latent_log_sigma"]
+    def apply(self, x):
+        """
+        Confirm that the input has shape (timesteps, batch_size, dim)
+        """
+        next_x = x
+        for i in range(num_layers):
+            inp, gates = self.linear_transforms[i].apply(next_x)
+            next_x = self.rnns[i].apply(inp, gates)
+
+        raw_stats = tensor.mean(next_x, axis = 0)
+        mu, log_sig = self.linear_transforms[num_layers].apply(raw_stats)
+
+        return mu, log_sig
+
 
 class Parrot(Initializable, Random):
     def __init__(
@@ -217,6 +292,7 @@ class Parrot(Initializable, Random):
             timing_coeff=1.,
             encoder_type=None,
             encoder_dim=128,
+            latent_dim = 32,
             **kwargs):
 
         super(Parrot, self).__init__(**kwargs)
@@ -247,6 +323,10 @@ class Parrot(Initializable, Random):
         self.encoder_dim = encoder_dim
 
         self.encoded_input_dim = input_dim
+
+
+        """TODO: Verify wherever use_latent has been used"""
+        self.use_latent = False
 
         if self.encoder_type == 'bidirectional':
             self.encoded_input_dim = 2 * encoder_dim
@@ -327,6 +407,17 @@ class Parrot(Initializable, Random):
             self.h1_to_h3,
             self.h2_to_h3,
             self.readout_to_output]
+
+        if self.use_latent:
+            self.latent_encoder = LatentEncoder(
+                "unidirectional",
+                output_dim,
+                rnn_h_dim,
+                latent_dim,
+                3,
+                **kwargs)
+            self.children += [
+                self.latent_encoder]
 
         if labels_type != 'unconditional':
             self.inp_to_h1 = Fork(
