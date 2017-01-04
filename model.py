@@ -1,3 +1,7 @@
+"Usage: "
+
+
+
 from blocks.bricks import (
     Initializable, Linear, Random)
 from blocks.bricks.base import lazy, application
@@ -37,6 +41,16 @@ def logsumexp(x, axis=None):
 
 def predict(probs, axis=-1):
     return tensor.argmax(probs, axis=axis)
+
+
+def kl_unit_gaussian(mu, log_sigma):
+    """
+    KL divergence from a unit Gaussian prior
+    mean across axis 0 (minibatch), sum across all other axes
+    based on yaost, via Alec via Ishaan
+    """
+    return -0.5 * (1 + 2 * log_sigma - mu**2 - tensor.exp(2 * log_sigma))
+
 
 
 # https://gist.github.com/benanne/2300591
@@ -202,6 +216,7 @@ class LatentEncoder(Initializable):
         assert encoder_type in ['unidirectional']
 
         self.encoder_type = encoder_type
+        self.num_layers = num_layers
 
         self.children = []
 
@@ -218,7 +233,7 @@ class LatentEncoder(Initializable):
                                     output_dims=[rnn_h_dim, 2 * rnn_h_dim],
                                     name='latent_rnn_{}_to_{}'.format(i,i+1)
                                 )
-            rnn = GatedRecurrent(dim=latent_dim, name='latent_rnn_'.format(i+1))
+            rnn = GatedRecurrent(dim=rnn_h_dim, name='latent_rnn_'.format(i+1))
             
             self.children.append(rnn_input_gates)
             self.children.append(rnn)
@@ -232,13 +247,13 @@ class LatentEncoder(Initializable):
                                     'latent_log_sig'
                                     ],
                             input_dim=rnn_h_dim,
-                            output_dims=[latent_dim, 2 * latent_dim],
+                            output_dims=[latent_dim, latent_dim],
                             name='rnn_{}_to_mu_logsig'.format(num_layers)
                         )
 
         self.children.append(mu_sig_fork)
 
-        self.linear_transforms.appned(mu_sig_fork)
+        self.linear_transforms.append(mu_sig_fork)
 
         kwargs.setdefault('children', []).extend(self.children)
 
@@ -249,20 +264,23 @@ class LatentEncoder(Initializable):
         return [rnn.initial_states(batch_size) for rnn in self.rnns]
 
 
-    @application(inputs=['x'], outputs=["latent_mu", "latent_log_sigma"]
-    def apply(self, x):
+    @application(inputs=['x', 'x_mask'], outputs=["latent_mu", "latent_log_sigma"])
+    def apply(self, x, x_mask):
         """
         Confirm that the input has shape (timesteps, batch_size, dim)
         """
         next_x = x
-        for i in range(num_layers):
+        for i in range(self.num_layers):
             inp, gates = self.linear_transforms[i].apply(next_x)
             next_x = self.rnns[i].apply(inp, gates)
 
-        raw_stats = tensor.mean(next_x, axis = 0)
-        mu, log_sig = self.linear_transforms[num_layers].apply(raw_stats)
+        next_x = next_x*x_mask[:,:,None]
 
-        return mu, log_sig
+        raw_stats = next_x.sum(axis = 0)/(x_mask.sum(axis = 0)[:, None] + 1e-5)
+
+        latent_mu, latent_log_sigma = self.linear_transforms[self.num_layers].apply(raw_stats)
+
+        return latent_mu, latent_log_sigma
 
 
 class Parrot(Initializable, Random):
@@ -326,7 +344,7 @@ class Parrot(Initializable, Random):
 
 
         """TODO: Verify wherever use_latent has been used"""
-        self.use_latent = False
+        self.use_latent = True
 
         if self.encoder_type == 'bidirectional':
             self.encoded_input_dim = 2 * encoder_dim
@@ -373,6 +391,7 @@ class Parrot(Initializable, Random):
             input_dim=rnn_h_dim,
             output_dims=[rnn_h_dim, 2 * rnn_h_dim],
             name='h2_to_h3')
+
 
         if which_cost == 'MSE':
             self.readout_to_output = Linear(
@@ -517,6 +536,39 @@ class Parrot(Initializable, Random):
                 self.speaker_to_h3,
                 self.speaker_to_readout,
                 self.speaker_to_output]
+
+        if self.use_latent:
+            self.latent_to_h = Fork(
+                output_names=['rnn1_inputs', 'rnn1_gates', 'rnn2_inputs',
+                             'rnn2_gates', 'rnn3_inputs', 'rnn3_gates' ],
+                input_dim=latent_dim,
+                output_dims=[rnn_h_dim, 2 * rnn_h_dim, rnn_h_dim, 
+                                2 * rnn_h_dim, rnn_h_dim, 2 * rnn_h_dim],
+                name='latent_to_h')
+
+            self.latent_to_readout = Linear(
+                input_dim=latent_dim,
+                output_dim=readouts_dim,
+                name='latent_to_readout')
+
+            if which_cost == 'MSE':
+                self.latent_to_output = Linear(
+                    input_dim=latent_dim,
+                    output_dim=output_dim,
+                    name='speaker_to_output')
+            elif which_cost == 'GMM':
+                self.latent_to_output = Fork(
+                    output_names=['gmm_mu', 'gmm_sigma', 'gmm_coeff'],
+                    input_dim=latent_dim,
+                    output_dims=[
+                        output_dim * k_gmm, output_dim * k_gmm, k_gmm],
+                    name='speaker_to_output')
+
+            self.children += [ 
+                self.latent_to_h,
+                self.latent_to_readout,
+                self.latent_to_output]
+
 
         if full_feedback:
             self.out_to_h2 = Fork(
@@ -712,6 +764,37 @@ class Parrot(Initializable, Random):
             gat_h2 = spk_gat_h2 + gat_h2
             gat_h3 = spk_gat_h3 + gat_h3
 
+        if self.use_latent:
+            mu, log_sig = self.latent_encoder.apply(features, features_mask)
+            e = tensor.cast(self.theano_rng.normal(mu.shape), floatX)
+
+            latent_var = mu + e*(tensor.exp(log_sig) + self.epsilon)
+
+            kl_cost = kl_unit_gaussian(mu, log_sig)
+
+            latent_var = tensor.shape_padleft(latent_var)
+
+
+            latent_cell_h1, latent_gat_h1, latent_cell_h2, \
+                latent_gat_h2, latent_cell_h3, latent_gat_h3 = self.latent_to_h.apply(latent_var)
+
+            to_normalize = [
+                latent_cell_h1, latent_gat_h1, latent_cell_h2,
+                latent_gat_h2, latent_cell_h3, latent_gat_h3 ]
+
+            latent_cell_h1, latent_gat_h1, latent_cell_h2, \
+                latent_gat_h2, latent_cell_h3, latent_gat_h3 = \
+                [_apply_norm(x, self.layer_norm) for x in to_normalize]
+
+            cell_h1 = latent_cell_h1 + cell_h1
+            cell_h2 = latent_cell_h2 + cell_h2
+            cell_h3 = latent_cell_h3 + cell_h3
+            gat_h1 = latent_gat_h1 + gat_h1
+            gat_h2 = latent_gat_h2 + gat_h2
+            gat_h3 = latent_gat_h3 + gat_h3
+
+
+
         initial_h1, last_h1, initial_h2, last_h2, initial_h3, last_h3, \
             initial_w, last_w, initial_k, last_k = \
             self.initial_states(batch_size)
@@ -849,6 +932,9 @@ class Parrot(Initializable, Random):
         if self.use_speaker:
             readouts += self.speaker_to_readout.apply(emb_speaker)
 
+        if self.use_latent:
+            readouts += self.latent_to_readout.apply(latent_var)
+
         if self.labels_type == 'unaligned':
             readouts += self.att_to_readout.apply(w)
 
@@ -857,6 +943,10 @@ class Parrot(Initializable, Random):
         if self.which_cost == 'MSE':
             if self.use_speaker:
                 predicted += self.speaker_to_output.apply(emb_speaker)
+
+            if self.use_latent:
+                predicted += self.latent_to_output.apply(latent_var)
+
             cost = tensor.sum((predicted - target_features) ** 2, axis=-1)
 
             next_x = predicted
@@ -870,6 +960,12 @@ class Parrot(Initializable, Random):
                 sigma += spk_to_out[1]
                 coeff += spk_to_out[2]
 
+            if self.use_latent:
+                latent_to_out = self.latent_to_output.apply(latent_var)
+                mu += latent_to_out[0]
+                sigma += latent_to_out[1]
+                coeff += latent_to_out[2]
+
             # When training there should not be sampling_bias
             sigma = tensor.exp(sigma) + self.epsilon
 
@@ -881,7 +977,10 @@ class Parrot(Initializable, Random):
             cost = cost_gmm(target_features, mu, sigma, coeff)
             next_x = sample_gmm(mu, sigma, coeff, self.theano_rng)
 
-        cost = (cost * mask).sum() / (mask.sum() + 1e-5) + 0. * start_flag
+        cost = (cost * mask).sum() / (mask.sum() + 1e-5) + 0. * start_flag 
+
+        if self.use_latent:
+            cost += 0.1*kl_cost.mean()
 
         updates = []
         updates.append((last_h1, h1[-1]))
@@ -968,6 +1067,34 @@ class Parrot(Initializable, Random):
             gat_h1 += spk_gat_h1
             gat_h2 += spk_gat_h2
             gat_h3 += spk_gat_h3
+
+        if self.use_latent:
+            latent_var = tensor.cast(theano_rng.normal((num_samples,latent_dim)), floatX)
+
+            latent_readout = self.latent_to_readout.apply(latent_var)
+            latent_output = self.latent_to_output.apply(latent_var)
+
+            latent_var = tensor.shape_padleft(latent_var)
+
+            latent_cell_h1, latent_gat_h1, latent_cell_h2, \
+                latent_gat_h2, latent_cell_h3, latent_gat_h3 = self.latent_to_h(latent_var)
+
+            to_normalize = [
+                latent_cell_h1, latent_gat_h1, latent_cell_h2,
+                latent_gat_h2, latent_cell_h3, latent_gat_h3 ]
+
+            latent_cell_h1, latent_gat_h1, latent_cell_h2, \
+                latent_gat_h2, latent_cell_h3, latent_gat_h3 = \
+                [_apply_norm(x, self.layer_norm) for x in to_normalize]
+
+            cell_h1 = latent_cell_h1 + cell_h1
+            cell_h2 = latent_cell_h2 + cell_h2
+            cell_h3 = latent_cell_h3 + cell_h3
+            gat_h1 = latent_gat_h1 + gat_h1
+            gat_h2 = latent_gat_h2 + gat_h2
+            gat_h3 = latent_gat_h3 + gat_h3
+
+
 
         if self.labels_type == 'unaligned':
             # TODO: include context_oh as context in the step function.
@@ -1117,12 +1244,18 @@ class Parrot(Initializable, Random):
             if self.use_speaker:
                 readout_t += spk_readout
 
+            if self.use_latent:
+                readout_t += latent_readout
+
             output_t = self.readout_to_output.apply(readout_t)
 
             if self.which_cost == 'MSE':
                 predicted_x_t = output_t
                 if self.use_speaker:
                     predicted_x_t += spk_output
+
+                if self.use_latent:
+                    predicted_x_t += latent_output
 
                 # Dummy value for coeff_t
                 coeff_t = predicted_x_t
@@ -1132,6 +1265,11 @@ class Parrot(Initializable, Random):
                     mu_t += spk_output[0]
                     sigma_t += spk_output[1]
                     coeff_t += spk_output[2]
+
+                if self.use_latent:
+                    mu_t += latent_output[0]
+                    sigma_t += latent_output[1]
+                    coeff_t += latent_output[2]
 
                 sigma_t = tensor.exp(sigma_t - self.sampling_bias) + \
                     self.epsilon

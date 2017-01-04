@@ -26,6 +26,22 @@ if args.algorithm == "adasecant":
 exp_name = args.experiment_name
 save_dir = args.save_dir
 
+
+if not os.path.exists(save_dir):
+    os.makedirs(save_dir)
+
+if not os.path.exists(os.path.join(save_dir, "config")):
+    os.makedirs(os.path.join(save_dir, "config"))
+
+if not os.path.exists(os.path.join(save_dir, "pkl")):
+    os.makedirs(os.path.join(save_dir, "pkl"))
+
+if not os.path.exists(os.path.join(save_dir, "progress")):
+    os.makedirs(os.path.join(save_dir, "progress"))
+
+
+
+
 print "Saving config ..."
 with open(os.path.join(save_dir, 'config', exp_name + '.pkl'), 'w') as f:
     cPickle.dump(args, f)
@@ -147,6 +163,7 @@ valid_monitor = DataStreamMonitoring(
     every_n_batches=args.save_every,
     after_epoch=False,
     prefix="valid")
+
 
 # Multi GPU
 worker = None
