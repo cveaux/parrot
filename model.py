@@ -233,7 +233,7 @@ class LatentEncoder(Initializable):
                                     output_dims=[rnn_h_dim, 2 * rnn_h_dim],
                                     name='latent_rnn_{}_to_{}'.format(i,i+1)
                                 )
-            rnn = GatedRecurrent(dim=rnn_h_dim, name='latent_rnn_'.format(i+1))
+            rnn = GatedRecurrent(dim=rnn_h_dim, name='latent_rnn_{}'.format(i+1))
             
             self.children.append(rnn_input_gates)
             self.children.append(rnn)
@@ -341,6 +341,7 @@ class Parrot(Initializable, Random):
         self.encoder_dim = encoder_dim
 
         self.encoded_input_dim = input_dim
+        self.latent_dim = latent_dim
 
 
         """TODO: Verify wherever use_latent has been used"""
@@ -1069,7 +1070,7 @@ class Parrot(Initializable, Random):
             gat_h3 += spk_gat_h3
 
         if self.use_latent:
-            latent_var = tensor.cast(theano_rng.normal((num_samples,latent_dim)), floatX)
+            latent_var = tensor.cast(self.theano_rng.normal((num_samples, self.latent_dim)), floatX)
 
             latent_readout = self.latent_to_readout.apply(latent_var)
             latent_output = self.latent_to_output.apply(latent_var)
@@ -1077,7 +1078,7 @@ class Parrot(Initializable, Random):
             latent_var = tensor.shape_padleft(latent_var)
 
             latent_cell_h1, latent_gat_h1, latent_cell_h2, \
-                latent_gat_h2, latent_cell_h3, latent_gat_h3 = self.latent_to_h(latent_var)
+                latent_gat_h2, latent_cell_h3, latent_gat_h3 = self.latent_to_h.apply(latent_var)
 
             to_normalize = [
                 latent_cell_h1, latent_gat_h1, latent_cell_h2,
