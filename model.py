@@ -311,7 +311,7 @@ class Parrot(Initializable, Random):
             encoder_type=None,
             encoder_dim=128,
             use_latent = True,
-            latent_dim = 32,
+            latent_dim = 64,
             **kwargs):
 
         super(Parrot, self).__init__(**kwargs)

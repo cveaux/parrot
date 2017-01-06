@@ -159,7 +159,7 @@ parrot = Parrot(**parrot_args)
 features, features_mask, labels, labels_mask, speaker, latent_var, start_flag = \
     parrot.symbolic_input_variables()
 
-cost, extra_updates, attention_vars = parrot.compute_cost(
+cost, extra_updates, attention_vars, kl_cost = parrot.compute_cost(
     features, features_mask, labels, labels_mask,
     speaker, start_flag, args.num_samples)
 
