@@ -15,8 +15,11 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 SAMPLING_RATE = 16000
 REFRESH_RATE = 100  # images per second
 
-SPTK_DIR = '/Tmp/sotelo/code/merlin/tools/bin/SPTK-3.9/'
-WORLD_DIR = '/Tmp/sotelo/code/merlin/tools/bin/WORLD/'
+# SPTK_DIR = '/Tmp/sotelo/code/merlin/tools/bin/SPTK-3.9/'
+# WORLD_DIR = '/Tmp/sotelo/code/merlin/tools/bin/WORLD/'
+
+SPTK_DIR = os.environ['SPTK_DIR']
+WORLD_DIR = os.environ['WORLD_DIR']
 
 
 def numpy_one_hot(data, n_class=None):
