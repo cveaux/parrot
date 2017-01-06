@@ -17,15 +17,26 @@ from utils import (
     sample_parse, create_animation, numpy_one_hot)
 from generate import generate_wav
 
+import theano
+
+floatX = theano.config.floatX
+
 logging.basicConfig()
 
 data_dir = os.environ['FUEL_DATA_PATH']
 args = sample_parse()
 
+LATENT_NUM = 5
+LATENT_DIM = 32
+
 with open(os.path.join(
         args.save_dir, 'config',
         args.experiment_name + '.pkl')) as f:
     saved_args = cPickle.load(f)
+
+
+if not os.path.exists(os.path.join(args.save_dir, "samples")):
+    os.makedirs(os.path.join(args.save_dir, "samples"))
 
 assert saved_args.dataset == args.dataset
 
@@ -145,7 +156,7 @@ parrot_args = {
 
 parrot = Parrot(**parrot_args)
 
-features, features_mask, labels, labels_mask, speaker, start_flag = \
+features, features_mask, labels, labels_mask, speaker, latent_var, start_flag = \
     parrot.symbolic_input_variables()
 
 cost, extra_updates, attention_vars = parrot.compute_cost(
@@ -161,9 +172,18 @@ if args.sample_one_step:
     gen_x, gen_k, gen_w, gen_pi, gen_phi, gen_pi_att = \
         parrot.sample_using_input(data_tr, args.num_samples)
 else:
+    labels_tr = numpy.repeat(labels_tr, LATENT_NUM, axis = 0)
+    labels_mask_tr = numpy.repeat(labels_mask_tr, LATENT_NUM, axis = 0)
+    features_mask_tr = numpy.repeat(features_mask_tr, LATENT_NUM, axis = 1)
+    speaker_tr = numpy.repeat(speaker_tr, LATENT_NUM, axis = 0)
+
+    latent_var_tr = numpy.random.normal(size=(LATENT_NUM, LATENT_DIM)).astype(floatX)
+    latent_var_tr = numpy.tile(latent_var_tr, (args.num_samples, 1))
+
+
     gen_x, gen_k, gen_w, gen_pi, gen_phi, gen_pi_att = parrot.sample_model(
-        labels_tr, labels_mask_tr, features_mask_tr,
-        speaker_tr, args.num_samples)
+        labels_tr, labels_mask_tr, features_mask_tr, 
+        speaker_tr, latent_var_tr, LATENT_NUM * args.num_samples)
 
 print "Successfully sampled the parrot."
 
@@ -177,7 +197,7 @@ if saved_args.labels_type in ['unaligned_phonemes', 'text']:
     gen_phi = gen_phi.swapaxes(0, 1)
     gen_pi_att = gen_pi_att.swapaxes(0, 1)
 
-    for i in range(args.num_samples):
+    for i in range(args.num_samples*LATENT_NUM):
         this_num_steps = int(features_mask_tr.sum(axis=0)[i])
         this_labels_length = int(labels_mask_tr.sum(axis=1)[i])
         this_x = gen_x[i][:this_num_steps]
@@ -191,7 +211,7 @@ if saved_args.labels_type in ['unaligned_phonemes', 'text']:
             [this_x, this_pi_att, this_k, this_w, this_phi],
             os.path.join(
                 args.save_dir, 'samples',
-                args.samples_name + '_' + str(i) + '.png'))
+                args.samples_name + '_' + str(i/LATENT_NUM) + '_latent_' + str(i%LATENT_NUM) + '.png'))
 
 norm_info_file = os.path.join(
     data_dir, args.dataset,
@@ -202,7 +222,7 @@ for i, this_sample in enumerate(gen_x):
     generate_wav(
         this_sample,
         os.path.join(args.save_dir, 'samples'),
-        args.samples_name + '_' + str(i),
+        args.samples_name + '_' + str(i/LATENT_NUM) + '_latent_' + str(i%LATENT_NUM),
         sptk_dir=args.sptk_dir,
         world_dir=args.world_dir,
         norm_info_file=norm_info_file,
@@ -215,7 +235,7 @@ if args.process_originals:
         generate_wav(
             this_sample,
             os.path.join(args.save_dir, 'samples'),
-            'original_' + args.samples_name + '_' + str(i),
+            'original_' + args.samples_name + '_' + str(i/LATENT_NUM) + '_latent_' + str(i%LATENT_NUM),
             sptk_dir=args.sptk_dir,
             world_dir=args.world_dir,
             norm_info_file=norm_info_file,
@@ -224,7 +244,7 @@ if args.process_originals:
 
 if args.animation:
     if saved_args.labels_type in ['unaligned_phonemes', 'text']:
-        for i in range(args.num_samples):
+        for i in range(args.num_samples*LATENT_NUM):
             this_num_steps = int(features_mask_tr.sum(axis=0)[i])
             this_labels_length = int(labels_mask_tr.sum(axis=1)[i])
             this_x = gen_x[i][:this_num_steps]
@@ -235,30 +255,30 @@ if args.animation:
             this_pi_att = gen_pi_att[i][:this_num_steps]
             create_animation(
                 [this_x, this_pi_att, this_k, this_w, this_phi],
-                args.samples_name + '_' + str(i) + '.wav',
-                args.samples_name + '_' + str(i),
+                args.samples_name + '_' + str(i/LATENT_NUM) + '_latent_' + str(i%LATENT_NUM) + '.wav',
+                args.samples_name + '_' + str(i/LATENT_NUM) + '_latent_' + str(i%LATENT_NUM),
                 os.path.join(args.save_dir, 'samples'))
 
     elif saved_args.labels_type in ['phonemes']:
-        for i in range(args.num_samples):
+        for i in range(args.num_samples*LATENT_NUM):
             this_num_steps = int(features_mask_tr.sum(axis=0)[i])
             this_x = gen_x[i][:this_num_steps]
             this_phoneme = labels_tr[:, i][:this_num_steps]
             create_animation(
                 [this_x, numpy_one_hot(
                     this_phoneme, saved_args.num_characters)],
-                args.samples_name + '_' + str(i) + '.wav',
-                args.samples_name + '_' + str(i),
+                args.samples_name + '_' + str(i/LATENT_NUM) + '_latent_' + str(i%LATENT_NUM) + '.wav',
+                args.samples_name + '_' + str(i/LATENT_NUM) + '_latent_' + str(i%LATENT_NUM),
                 os.path.join(args.save_dir, 'samples'))
 
         if args.process_originals:
-            for i in range(args.num_samples):
+            for i in range(args.num_samples*LATENT_NUM):
                 this_num_steps = int(features_mask_tr.sum(axis=0)[i])
                 this_x = features_tr[:, i][:this_num_steps]
                 this_phoneme = labels_tr[:, i][:this_num_steps]
                 create_animation(
                     [this_x, numpy_one_hot(
                         this_phoneme, saved_args.num_characters)],
-                    'original_' + args.samples_name + '_' + str(i) + '.wav',
-                    'original_' + args.samples_name + '_' + str(i),
+                    'original_' + args.samples_name + '_' + str(i/LATENT_NUM) + '_latent_' + str(i%LATENT_NUM) + '.wav',
+                    'original_' + '_' + str(i/LATENT_NUM) + '_latent_' + str(i%LATENT_NUM),
                     os.path.join(args.save_dir, 'samples'))

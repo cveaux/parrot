@@ -99,15 +99,18 @@ parrot_args = {
 parrot = Parrot(**parrot_args)
 parrot.initialize()
 
-features, features_mask, labels, labels_mask, speaker, start_flag = \
+features, features_mask, labels, labels_mask, speaker, latent_var, start_flag = \
     parrot.symbolic_input_variables()
 
-cost, extra_updates, attention_vars = parrot.compute_cost(
+cost, extra_updates, attention_vars, kl_cost = parrot.compute_cost(
     features, features_mask, labels, labels_mask,
     speaker, start_flag, args.batch_size)
 
 cost_name = 'nll'
 cost.name = cost_name
+
+if parrot.use_latent:
+    kl_cost.name = "KL"
 
 cg = ComputationGraph(cost)
 model = Model(cost)
@@ -146,6 +149,11 @@ algorithm.add_updates(extra_updates)
 
 monitoring_vars = [cost]
 plot_names = [['train_nll', 'valid_nll']]
+
+if parrot.use_latent:
+    monitoring_vars.append(kl_cost)
+    plot_names.append(['train_KL', 'valid_KL'])
+
 
 if args.lr_schedule:
     lr = algorithm.step_rule.components[1].learning_rate

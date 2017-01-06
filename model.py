@@ -310,6 +310,7 @@ class Parrot(Initializable, Random):
             timing_coeff=1.,
             encoder_type=None,
             encoder_dim=128,
+            use_latent = True,
             latent_dim = 32,
             **kwargs):
 
@@ -345,7 +346,8 @@ class Parrot(Initializable, Random):
 
 
         """TODO: Verify wherever use_latent has been used"""
-        self.use_latent = True
+        self.use_latent = use_latent
+        
 
         if self.encoder_type == 'bidirectional':
             self.encoded_input_dim = 2 * encoder_dim
@@ -630,8 +632,13 @@ class Parrot(Initializable, Random):
         else:
             speaker = None
 
+        if self.use_latent:
+            latent_var = tensor.matrix('latent_code')
+        else:
+            latent_var = None
+
         return features, features_mask, labels, labels_mask, \
-            speaker, start_flag
+            speaker, latent_var, start_flag
 
     def initial_states(self, batch_size):
         initial_h1 = self.rnn1.initial_states(batch_size)
@@ -669,6 +676,8 @@ class Parrot(Initializable, Random):
 
         if labels is None:
             assert self.labels_type == 'unconditional'
+
+        kl_cost = None
 
         target_features = features[1:]
         mask = features_mask[1:]
@@ -771,7 +780,7 @@ class Parrot(Initializable, Random):
 
             latent_var = mu + e*(tensor.exp(log_sig) + self.epsilon)
 
-            kl_cost = kl_unit_gaussian(mu, log_sig)
+            kl_cost = kl_unit_gaussian(mu, log_sig).sum(axis=1).mean()
 
             latent_var = tensor.shape_padleft(latent_var)
 
@@ -981,7 +990,7 @@ class Parrot(Initializable, Random):
         cost = (cost * mask).sum() / (mask.sum() + 1e-5) + 0. * start_flag 
 
         if self.use_latent:
-            cost += 0.1*kl_cost.mean()
+            cost += 0.1*kl_cost
 
         updates = []
         updates.append((last_h1, h1[-1]))
@@ -994,11 +1003,11 @@ class Parrot(Initializable, Random):
 
         attention_vars = [next_x, k, w, coeff, phi, pi_att]
 
-        return cost, scan_updates + updates, attention_vars
+        return cost, scan_updates + updates, attention_vars, kl_cost
 
     @application
     def sample_model_fun(
-            self, labels, labels_mask, speaker, num_samples, seq_size):
+            self, labels, labels_mask, speaker, latent_var, num_samples, seq_size):
 
         initial_h1, last_h1, initial_h2, last_h2, initial_h3, last_h3, \
             initial_w, last_w, initial_k, last_k = \
@@ -1070,7 +1079,7 @@ class Parrot(Initializable, Random):
             gat_h3 += spk_gat_h3
 
         if self.use_latent:
-            latent_var = tensor.cast(self.theano_rng.normal((num_samples, self.latent_dim)), floatX)
+            # latent_var = tensor.cast(self.theano_rng.normal((num_samples, self.latent_dim)), floatX)
 
             latent_readout = self.latent_to_readout.apply(latent_var)
             latent_output = self.latent_to_output.apply(latent_var)
@@ -1310,15 +1319,15 @@ class Parrot(Initializable, Random):
         return sample_x, k, w, pi, phi, pi_att, updates
 
     def sample_model(
-            self, labels_tr, labels_mask_tr, features_mask_tr,
-            speaker_tr, num_samples):
+            self, labels_tr, labels_mask_tr, features_mask_tr, 
+            speaker_tr, latent_var_tr, num_samples):
 
-        features, features_mask, labels, labels_mask, speaker, start_flag = \
+        features, features_mask, labels, labels_mask, speaker, latent_var, start_flag = \
             self.symbolic_input_variables()
 
         sample_x, k, w, pi, phi, pi_att, updates = \
             self.sample_model_fun(
-                labels, labels_mask, speaker,
+                labels, labels_mask, speaker, latent_var,
                 num_samples, features_mask.shape[0])
 
         theano_inputs = [features_mask]
@@ -1336,6 +1345,10 @@ class Parrot(Initializable, Random):
             theano_inputs += [speaker]
             numpy_inputs += (speaker_tr,)
 
+        if self.use_latent:
+            theano_inputs += [latent_var]
+            numpy_inputs += (latent_var_tr,)
+
         return function(
             theano_inputs,
             [sample_x, k, w, pi, phi, pi_att],
@@ -1344,10 +1357,10 @@ class Parrot(Initializable, Random):
     def sample_using_input(self, data_tr, num_samples):
         # Used to predict the values using the dataset
 
-        features, features_mask, labels, labels_mask, speaker, start_flag = \
+        features, features_mask, labels, labels_mask, speaker, latent_var, start_flag = \
             self.symbolic_input_variables()
 
-        cost, updates, attention_vars = self.compute_cost(
+        cost, updates, attention_vars, kl_cost = self.compute_cost(
             features, features_mask, labels, labels_mask,
             speaker, start_flag, num_samples)
         sample_x, k, w, pi, phi, pi_att = attention_vars
