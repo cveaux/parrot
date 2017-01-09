@@ -2,7 +2,7 @@
 Usage: 
 
 THEANO_FLAGS="mode=FAST_RUN,floatX=float32,device=gpu,lib.cnmem=.95" python -u train.py \
- --experiment_name latent_annealed --labels_type unaligned_phonemes --dataset blizzard \
+ --experiment_name new_latent_annealed --labels_type unaligned_phonemes --dataset vctk \
  --num_characters 44 --input_dim 128 --weak_feedback True --attention_alignment 0.05 --attention_type softmax \
  --seq_size 10000 --lr_schedule True --encoder_type bidirectional --feedback_noise_level 4
 
@@ -999,7 +999,7 @@ class Parrot(Initializable, Random):
 
         if self.use_latent:
             iters = shared_floatx(0.)
-            kl_coeff = iters/(iters + 1e5)
+            kl_coeff = iters/(iters + 5e5)
             cost += kl_coeff*kl_cost
 
         updates = []
