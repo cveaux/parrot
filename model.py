@@ -1,4 +1,12 @@
-"Usage: "
+"""
+Usage: 
+
+THEANO_FLAGS="mode=FAST_RUN,floatX=float32,device=gpu,lib.cnmem=.95" python -u train.py \
+ --experiment_name latent_annealed --labels_type unaligned_phonemes --dataset blizzard \
+ --num_characters 44 --input_dim 128 --weak_feedback True --attention_alignment 0.05 --attention_type softmax \
+ --seq_size 10000 --lr_schedule True --encoder_type bidirectional --feedback_noise_level 4
+
+ """
 
 
 
@@ -9,7 +17,7 @@ from blocks.bricks.lookup import LookupTable
 from blocks.bricks.parallel import Fork
 from blocks.bricks.recurrent import GatedRecurrent, Bidirectional
 from blocks.roles import add_role, INITIAL_STATE
-from blocks.utils import shared_floatx_zeros, dict_union
+from blocks.utils import shared_floatx_zeros, dict_union, shared_floatx
 
 import numpy
 
@@ -990,12 +998,17 @@ class Parrot(Initializable, Random):
         cost = (cost * mask).sum() / (mask.sum() + 1e-5) + 0. * start_flag 
 
         if self.use_latent:
-            cost += 0.1*kl_cost
+            iters = shared_floatx(0.)
+            kl_coeff = iters/(iters + 1e5)
+            cost += kl_coeff*kl_cost
 
         updates = []
         updates.append((last_h1, h1[-1]))
         updates.append((last_h2, h2[-1]))
         updates.append((last_h3, h3[-1]))
+
+        if self.use_latent:
+            updates.append((iters, iters + 1.))
 
         if self.labels_type == 'unaligned':
             updates.append((last_k, k[-1]))

@@ -26,9 +26,6 @@ logging.basicConfig()
 data_dir = os.environ['FUEL_DATA_PATH']
 args = sample_parse()
 
-LATENT_NUM = 5
-LATENT_DIM = 32
-
 with open(os.path.join(
         args.save_dir, 'config',
         args.experiment_name + '.pkl')) as f:
@@ -155,6 +152,9 @@ parrot_args = {
     'name': 'parrot'}
 
 parrot = Parrot(**parrot_args)
+
+LATENT_NUM = 5
+LATENT_DIM = parrot.latent_dim
 
 features, features_mask, labels, labels_mask, speaker, latent_var, start_flag = \
     parrot.symbolic_input_variables()
