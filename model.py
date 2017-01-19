@@ -288,7 +288,7 @@ class Parrot(Initializable, Random):
             labels_type='full_labels',  # full or phoneme labels
             weak_feedback=False,  # Feedback to the top rnn layer
             full_feedback=False,  # Feedback to all rnn layers
-            very_week_feedback=False,  # Feedback to only h3
+            very_weak_feedback=False,  # Feedback to only h3
             feedback_noise_level=None,  # Amount of noise in feedback
             layer_norm=False,  # Use simple normalization?
             use_speaker=False,  # Condition on the speaker id?
@@ -344,9 +344,9 @@ class Parrot(Initializable, Random):
         self.initial_iters = initial_iters
 
         self.use_mutual_info = use_mutual_info
-        self.very_week_feedback = very_week_feedback
+        self.very_weak_feedback = very_weak_feedback
 
-        if self.very_week_feedback:
+        if self.very_weak_feedback:
             self.weak_feedback = False
             self.full_feedback = False
 
@@ -606,7 +606,7 @@ class Parrot(Initializable, Random):
             self.children += [
                 self.out_to_h1]
 
-        if self.very_week_feedback:
+        if self.very_weak_feedback:
             self.out_to_h3_feedback = Fork(
                 output_names=['rnn3_inputs_feedback', 'rnn3_gates_feedback'],
                 input_dim=output_dim,
@@ -765,7 +765,7 @@ class Parrot(Initializable, Random):
             cell_h3 += out_cell_h3
             gat_h3 += out_gat_h3
 
-        if self.very_week_feedback:
+        if self.very_weak_feedback:
             input_features = features[:-1]
 
             if self.feedback_noise_level:
@@ -1217,7 +1217,7 @@ class Parrot(Initializable, Random):
                 gat_h2_t += out_gat_h2_t
                 gat_h3_t += out_gat_h3_t
 
-            if self.very_week_feedback:
+            if self.very_weak_feedback:
                 out_cell_h3_t, out_gat_h3_t = self.out_to_h3_feedback.apply(x_tm1)
                 to_normalize = [out_cell_h3_t, out_gat_h3_t]
                 out_cell_h3_t, out_gat_h3_t = \

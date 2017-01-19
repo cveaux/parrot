@@ -88,7 +88,7 @@ parrot_args = {
     'labels_type': args.labels_type,
     'weak_feedback': args.weak_feedback,
     'full_feedback': args.full_feedback,
-    'very_week_feedback': args.very_week_feedback,
+    'very_weak_feedback': args.very_weak_feedback,
     'feedback_noise_level': args.feedback_noise_level,
     'layer_norm': args.layer_norm,
     'use_speaker': args.use_speaker,

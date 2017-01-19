@@ -127,7 +127,7 @@ if not hasattr(saved_args, 'weak_feedback'):
     saved_args.weak_feedback = False
 if not hasattr(saved_args, 'full_feedback'):
     saved_args.full_feedback = False
-if not hasattr(saved_args, 'very_week_feedback'):
+if not hasattr(saved_args, 'very_weak_feedback'):
     saved_args.full_feedback = False
 if not hasattr(saved_args, 'labels_type'):
     saved_args.labels_type = 'full'
@@ -140,7 +140,7 @@ parrot_args = {
     'labels_type': saved_args.labels_type,
     'weak_feedback': saved_args.weak_feedback,
     'full_feedback': saved_args.full_feedback,
-    'very_week_feedback': saved_args.very_week_feedback,
+    'very_weak_feedback': saved_args.very_weak_feedback,
     'feedback_noise_level': None,
     'layer_norm': saved_args.layer_norm,
     'use_speaker': saved_args.use_speaker,
