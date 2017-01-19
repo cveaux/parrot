@@ -1,15 +1,3 @@
-"""
-Usage: 
-
-THEANO_FLAGS="mode=FAST_RUN,floatX=float32,device=gpu,lib.cnmem=.95" python -u train.py \
- --experiment_name new_latent_annealed --labels_type unaligned_phonemes --dataset vctk \
- --num_characters 44 --input_dim 128 --weak_feedback True --attention_alignment 0.05 --attention_type softmax \
- --seq_size 10000 --lr_schedule True --encoder_type bidirectional --feedback_noise_level 4
-
- """
-
-
-
 from blocks.bricks import (
     Initializable, Linear, Random)
 from blocks.bricks.base import lazy, application
@@ -239,10 +227,9 @@ class LatentEncoder(Initializable):
                                             ],
                                     input_dim=rnn_h_dim if i != 0 else input_dim,
                                     output_dims=[rnn_h_dim, 2 * rnn_h_dim],
-                                    name='latent_rnn_{}_to_{}'.format(i,i+1)
+                                    name='latent_rnn_{}_to_{}'.format(i, i+1)
                                 )
             rnn = GatedRecurrent(dim=rnn_h_dim, name='latent_rnn_{}'.format(i+1))
-            
             self.children.append(rnn_input_gates)
             self.children.append(rnn)
 
@@ -284,7 +271,7 @@ class LatentEncoder(Initializable):
 
         next_x = next_x*x_mask[:,:,None]
 
-        raw_stats = next_x.sum(axis = 0)/(x_mask.sum(axis = 0)[:, None] + 1e-5)
+        raw_stats = next_x.sum(axis=0)/(x_mask.sum(axis=0)[:, None] + 1e-5)
 
         latent_mu, latent_log_sigma = self.linear_transforms[self.num_layers].apply(raw_stats)
 
@@ -301,6 +288,7 @@ class Parrot(Initializable, Random):
             labels_type='full_labels',  # full or phoneme labels
             weak_feedback=False,  # Feedback to the top rnn layer
             full_feedback=False,  # Feedback to all rnn layers
+            very_week_feedback = False, # Feedback to only h3
             feedback_noise_level=None,  # Amount of noise in feedback
             layer_norm=False,  # Use simple normalization?
             use_speaker=False,  # Condition on the speaker id?
@@ -318,8 +306,9 @@ class Parrot(Initializable, Random):
             timing_coeff=1.,
             encoder_type=None,
             encoder_dim=128,
-            use_latent = True,
-            latent_dim = 64,
+            use_latent=True,
+            latent_dim=64,
+            initial_iters=0,
             **kwargs):
 
         super(Parrot, self).__init__(**kwargs)
@@ -351,11 +340,18 @@ class Parrot(Initializable, Random):
 
         self.encoded_input_dim = input_dim
         self.latent_dim = latent_dim
+        self.initial_iters = initial_iters
+
+        self.use_mutual_info = False
+        self.very_week_feedback = True
+
+        if self.very_week_feedback:
+            self.weak_feedback = False
+            self.full_feedback = False
 
 
         """TODO: Verify wherever use_latent has been used"""
-        self.use_latent = use_latent
-        
+        self.use_latent = use_latent       
 
         if self.encoder_type == 'bidirectional':
             self.encoded_input_dim = 2 * encoder_dim
@@ -609,6 +605,15 @@ class Parrot(Initializable, Random):
             self.children += [
                 self.out_to_h1]
 
+        if self.very_week_feedback:
+            self.out_to_h3_feedback = Fork(
+                output_names=['rnn3_inputs_feedback', 'rnn3_gates_feedback'],
+                input_dim=output_dim,
+                output_dims=[rnn_h_dim, 2 * rnn_h_dim],
+                name='out_to_h3_feedback')
+            self.children += [
+                self.out_to_h3_feedback]
+
     def _allocate(self):
         self.initial_w = shared_floatx_zeros(
             (self.encoded_input_dim,), name="initial_w")
@@ -677,7 +682,7 @@ class Parrot(Initializable, Random):
     @application
     def compute_cost(
             self, features, features_mask, labels, labels_mask,
-            speaker, start_flag, batch_size):
+            speaker, start_flag, batch_size, is_train = True):
 
         if speaker is None:
             assert not self.use_speaker
@@ -686,6 +691,7 @@ class Parrot(Initializable, Random):
             assert self.labels_type == 'unconditional'
 
         kl_cost = None
+        mutual_info = None
 
         target_features = features[1:]
         mask = features_mask[1:]
@@ -758,6 +764,22 @@ class Parrot(Initializable, Random):
             cell_h3 += out_cell_h3
             gat_h3 += out_gat_h3
 
+        if self.very_week_feedback:
+            input_features = features[:-1]
+
+            if self.feedback_noise_level:
+                noise = self.theano_rng.normal(
+                    size=input_features.shape,
+                    avg=0., std=1.)
+                input_features += self.noise_level_var * noise
+
+            out_cell_h3, out_gat_h3 = self.out_to_h3_feedback.apply(input_features)
+            to_normalize = [out_cell_h3, out_gat_h3]
+            out_cell_h3, out_gat_h3 = \
+                [_apply_norm(x, self.layer_norm) for x in to_normalize]
+            cell_h3 += out_cell_h3
+            gat_h3 += out_gat_h3
+
         if self.use_speaker:
             speaker = speaker[:, 0]
             emb_speaker = self.embed_speaker.apply(speaker)
@@ -788,7 +810,9 @@ class Parrot(Initializable, Random):
 
             latent_var = mu + e*(tensor.exp(log_sig) + self.epsilon)
 
-            kl_cost = kl_unit_gaussian(mu, log_sig).sum(axis=1).mean()
+            kl_cost = kl_unit_gaussian(mu, log_sig).sum(axis=1)
+
+            kl_cost = kl_cost.mean()
 
             latent_var = tensor.shape_padleft(latent_var)
 
@@ -796,13 +820,13 @@ class Parrot(Initializable, Random):
             latent_cell_h1, latent_gat_h1, latent_cell_h2, \
                 latent_gat_h2, latent_cell_h3, latent_gat_h3 = self.latent_to_h.apply(latent_var)
 
-            to_normalize = [
-                latent_cell_h1, latent_gat_h1, latent_cell_h2,
-                latent_gat_h2, latent_cell_h3, latent_gat_h3 ]
+            # to_normalize = [
+            #     latent_cell_h1, latent_gat_h1, latent_cell_h2,
+            #     latent_gat_h2, latent_cell_h3, latent_gat_h3 ]
 
-            latent_cell_h1, latent_gat_h1, latent_cell_h2, \
-                latent_gat_h2, latent_cell_h3, latent_gat_h3 = \
-                [_apply_norm(x, self.layer_norm) for x in to_normalize]
+            # latent_cell_h1, latent_gat_h1, latent_cell_h2, \
+            #     latent_gat_h2, latent_cell_h3, latent_gat_h3 = \
+            #     [_apply_norm(x, self.layer_norm) for x in to_normalize]
 
             cell_h1 = latent_cell_h1 + cell_h1
             cell_h2 = latent_cell_h2 + cell_h2
@@ -964,6 +988,14 @@ class Parrot(Initializable, Random):
 
             if self.use_latent:
                 predicted += self.latent_to_output.apply(latent_var)
+                if self.use_mutual_info:
+                    mu_pred, log_sigma_pred = self.latent_encoder.apply(predicted, mask)
+                    mutual_info = 0.5*(2*log_sig - 2*log_sigma_pred + (tensor.exp(2*log_sigma_pred) +\
+                                     (mu_pred - mu)**2)*(tensor.exp(-2*log_sig) + 0.00001))
+
+                    mutual_info = mutual_info.sum(axis=1).mean()
+
+
 
             cost = tensor.sum((predicted - target_features) ** 2, axis=-1)
 
@@ -998,9 +1030,15 @@ class Parrot(Initializable, Random):
         cost = (cost * mask).sum() / (mask.sum() + 1e-5) + 0. * start_flag 
 
         if self.use_latent:
-            iters = shared_floatx(0.)
-            kl_coeff = iters/(iters + 5e5)
-            cost += kl_coeff*kl_cost
+            iters = shared_floatx(self.initial_iters)
+            # kl_coeff = iters/(iters + 5e5)
+            kl_cost = kl_cost/(mask.sum() + 1e-5)
+            # cost += kl_coeff*kl_cost
+            cost += kl_cost
+
+            if self.use_mutual_info:
+                cost += mutual_info/(mask.sum() + 1e-5)
+
 
         updates = []
         updates.append((last_h1, h1[-1]))
@@ -1016,7 +1054,7 @@ class Parrot(Initializable, Random):
 
         attention_vars = [next_x, k, w, coeff, phi, pi_att]
 
-        return cost, scan_updates + updates, attention_vars, kl_cost
+        return cost, scan_updates + updates, attention_vars, kl_cost, mutual_info
 
     @application
     def sample_model_fun(
@@ -1102,13 +1140,13 @@ class Parrot(Initializable, Random):
             latent_cell_h1, latent_gat_h1, latent_cell_h2, \
                 latent_gat_h2, latent_cell_h3, latent_gat_h3 = self.latent_to_h.apply(latent_var)
 
-            to_normalize = [
-                latent_cell_h1, latent_gat_h1, latent_cell_h2,
-                latent_gat_h2, latent_cell_h3, latent_gat_h3 ]
+            # to_normalize = [
+            #     latent_cell_h1, latent_gat_h1, latent_cell_h2,
+            #     latent_gat_h2, latent_cell_h3, latent_gat_h3 ]
 
-            latent_cell_h1, latent_gat_h1, latent_cell_h2, \
-                latent_gat_h2, latent_cell_h3, latent_gat_h3 = \
-                [_apply_norm(x, self.layer_norm) for x in to_normalize]
+            # latent_cell_h1, latent_gat_h1, latent_cell_h2, \
+            #     latent_gat_h2, latent_cell_h3, latent_gat_h3 = \
+            #     [_apply_norm(x, self.layer_norm) for x in to_normalize]
 
             cell_h1 = latent_cell_h1 + cell_h1
             cell_h2 = latent_cell_h2 + cell_h2
@@ -1176,6 +1214,14 @@ class Parrot(Initializable, Random):
                 cell_h2_t += out_cell_h2_t
                 cell_h3_t += out_cell_h3_t
                 gat_h2_t += out_gat_h2_t
+                gat_h3_t += out_gat_h3_t
+
+            if self.very_week_feedback:
+                out_cell_h3_t, out_gat_h3_t = self.out_to_h3_feedback.apply(x_tm1)
+                to_normalize = [out_cell_h3_t, out_gat_h3_t]
+                out_cell_h3_t, out_gat_h3_t = \
+                    [_apply_norm(x, self.layer_norm) for x in to_normalize]
+                cell_h3_t += out_cell_h3_t
                 gat_h3_t += out_gat_h3_t
 
             h1_t = self.rnn1.apply(
@@ -1341,10 +1387,10 @@ class Parrot(Initializable, Random):
         sample_x, k, w, pi, phi, pi_att, updates = \
             self.sample_model_fun(
                 labels, labels_mask, speaker, latent_var,
-                num_samples, features_mask.shape[0])
+                num_samples, 1000)
 
-        theano_inputs = [features_mask]
-        numpy_inputs = (features_mask_tr,)
+        theano_inputs = []
+        numpy_inputs = ()
 
         if self.labels_type != 'unconditional':
             theano_inputs += [labels]
@@ -1373,7 +1419,7 @@ class Parrot(Initializable, Random):
         features, features_mask, labels, labels_mask, speaker, latent_var, start_flag = \
             self.symbolic_input_variables()
 
-        cost, updates, attention_vars, kl_cost = self.compute_cost(
+        cost, updates, attention_vars, kl_cost, mutual_info = self.compute_cost(
             features, features_mask, labels, labels_mask,
             speaker, start_flag, num_samples)
         sample_x, k, w, pi, phi, pi_att = attention_vars

@@ -1,3 +1,12 @@
+"""
+Usage: 
+THEANO_FLAGS="mode=FAST_RUN,floatX=float32,device=gpu,lib.cnmem=.95" python -u train.py \
+ --experiment_name new_latent_annealed --labels_type unaligned_phonemes --dataset vctk \
+ --num_characters 44 --input_dim 128 --weak_feedback True --attention_alignment 0.05 --attention_type softmax \
+ --seq_size 10000 --lr_schedule True --encoder_type bidirectional --feedback_noise_level 4 --initial_iters 0
+
+ """
+
 import os
 from algorithms import Adasecant
 from blocks import initialization
@@ -38,9 +47,6 @@ if not os.path.exists(os.path.join(save_dir, "pkl")):
 
 if not os.path.exists(os.path.join(save_dir, "progress")):
     os.makedirs(os.path.join(save_dir, "progress"))
-
-
-
 
 print "Saving config ..."
 with open(os.path.join(save_dir, 'config', exp_name + '.pkl'), 'w') as f:
@@ -94,7 +100,8 @@ parrot_args = {
     'encoder_type': args.encoder_type,
     'weights_init': w_init,
     'biases_init': b_init,
-    'name': 'parrot'}
+    'name': 'parrot',
+    'initial_iters': args.initial_iters}
 
 parrot = Parrot(**parrot_args)
 parrot.initialize()
@@ -102,15 +109,17 @@ parrot.initialize()
 features, features_mask, labels, labels_mask, speaker, latent_var, start_flag = \
     parrot.symbolic_input_variables()
 
-cost, extra_updates, attention_vars, kl_cost = parrot.compute_cost(
+cost, extra_updates, attention_vars, kl_cost, mutual_info = parrot.compute_cost(
     features, features_mask, labels, labels_mask,
-    speaker, start_flag, args.batch_size)
+    speaker, start_flag, args.batch_size, is_train = True)
 
 cost_name = 'nll'
 cost.name = cost_name
 
 if parrot.use_latent:
     kl_cost.name = "KL"
+    if parrot.use_mutual_info:
+        mutual_info.name = "mutual_info"
 
 cg = ComputationGraph(cost)
 model = Model(cost)
@@ -153,6 +162,10 @@ plot_names = [['train_nll', 'valid_nll']]
 if parrot.use_latent:
     monitoring_vars.append(kl_cost)
     plot_names.append(['train_KL', 'valid_KL'])
+
+    if parrot.use_mutual_info:
+        monitoring_vars.append(mutual_info)
+        plot_names.append(['train_mutual_info', 'valid_mutual_info'])
 
 
 if args.lr_schedule:

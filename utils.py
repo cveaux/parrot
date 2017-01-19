@@ -189,6 +189,11 @@ def train_parse():
     parser.add_argument('--save_dir', type=str,
                         default=os.environ['RESULTS_DIR'],
                         help='save dir directory')
+    
+    parser.add_argument('--initial_iters', type=int, 
+                        default=0,
+                        help='Number of iterations already done')
+
 
     args = parser.parse_args()
     if args.dataset not in args.save_dir:
@@ -260,6 +265,9 @@ def sample_parse():
     parser.add_argument('--random_speaker', type=bool,
                         default=False,
                         help='generate with random speaker')
+    parser.add_argument('--initial_iters', type=int, 
+                        default=0,
+                        help='Number of iterations already done')
 
     args = parser.parse_args()
     if args.dataset not in args.save_dir:

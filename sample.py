@@ -1,5 +1,7 @@
 """Sampling code for the parrot.
 
+Usage: THEANO_FLAGS="mode=FAST_RUN,floatX=float32,device=gpu,lib.cnmem=.95" python -u sample.py --experiment_name bidirectional_encoder --dataset vctk --samples_name dummy
+
 Loads the trained model and samples.
 """
 
@@ -159,7 +161,7 @@ LATENT_DIM = parrot.latent_dim
 features, features_mask, labels, labels_mask, speaker, latent_var, start_flag = \
     parrot.symbolic_input_variables()
 
-cost, extra_updates, attention_vars, kl_cost = parrot.compute_cost(
+cost, extra_updates, attention_vars, kl_cost, mutual_info = parrot.compute_cost(
     features, features_mask, labels, labels_mask,
     speaker, start_flag, args.num_samples)
 
