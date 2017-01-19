@@ -88,6 +88,7 @@ parrot_args = {
     'labels_type': args.labels_type,
     'weak_feedback': args.weak_feedback,
     'full_feedback': args.full_feedback,
+    'very_week_feedback': args.very_week_feedback,
     'feedback_noise_level': args.feedback_noise_level,
     'layer_norm': args.layer_norm,
     'use_speaker': args.use_speaker,
@@ -101,6 +102,7 @@ parrot_args = {
     'weights_init': w_init,
     'biases_init': b_init,
     'name': 'parrot',
+    'use_mutual_info': args.use_mutual_info,
     'initial_iters': args.initial_iters}
 
 parrot = Parrot(**parrot_args)

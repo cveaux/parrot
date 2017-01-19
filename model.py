@@ -288,7 +288,7 @@ class Parrot(Initializable, Random):
             labels_type='full_labels',  # full or phoneme labels
             weak_feedback=False,  # Feedback to the top rnn layer
             full_feedback=False,  # Feedback to all rnn layers
-            very_week_feedback = False, # Feedback to only h3
+            very_week_feedback=False,  # Feedback to only h3
             feedback_noise_level=None,  # Amount of noise in feedback
             layer_norm=False,  # Use simple normalization?
             use_speaker=False,  # Condition on the speaker id?
@@ -309,6 +309,7 @@ class Parrot(Initializable, Random):
             use_latent=True,
             latent_dim=64,
             initial_iters=0,
+            use_mutual_info=False,
             **kwargs):
 
         super(Parrot, self).__init__(**kwargs)
@@ -342,8 +343,8 @@ class Parrot(Initializable, Random):
         self.latent_dim = latent_dim
         self.initial_iters = initial_iters
 
-        self.use_mutual_info = False
-        self.very_week_feedback = True
+        self.use_mutual_info = use_mutual_info
+        self.very_week_feedback = very_week_feedback
 
         if self.very_week_feedback:
             self.weak_feedback = False

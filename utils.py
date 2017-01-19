@@ -130,6 +130,8 @@ def train_parse():
                         help='size of readouts')
     parser.add_argument('--weak_feedback', type=bool, default=False,
                         help='feedback to top layer')
+    parser.add_argument('--very_weak_feedback', type=bool, default=False,
+                        help='feedback to top layer')
     parser.add_argument('--full_feedback', type=bool, default=False,
                         help='feedback to all layers')
     parser.add_argument('--feedback_noise_level', type=float, default=None,
@@ -189,7 +191,8 @@ def train_parse():
     parser.add_argument('--save_dir', type=str,
                         default=os.environ['RESULTS_DIR'],
                         help='save dir directory')
-    
+    parser.add_argument('--use_mutual_info', type=bool, default=False,
+                        help='feedback to top layer')
     parser.add_argument('--initial_iters', type=int, 
                         default=0,
                         help='Number of iterations already done')
