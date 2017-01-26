@@ -103,7 +103,9 @@ parrot_args = {
     'biases_init': b_init,
     'name': 'parrot',
     'use_mutual_info': args.use_mutual_info,
-    'initial_iters': args.initial_iters}
+    'initial_iters': args.initial_iters,
+    'only_noise': args.only_noise,
+    'only_residual_train': args.only_residual_train}
 
 parrot = Parrot(**parrot_args)
 parrot.initialize()

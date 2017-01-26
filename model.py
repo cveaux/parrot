@@ -310,6 +310,9 @@ class Parrot(Initializable, Random):
             latent_dim=64,
             initial_iters=0,
             use_mutual_info=False,
+            only_noise=False,
+            only_residual_train=False,
+            only_compute_delta_norm=True,
             **kwargs):
 
         super(Parrot, self).__init__(**kwargs)
@@ -345,6 +348,10 @@ class Parrot(Initializable, Random):
 
         self.use_mutual_info = use_mutual_info
         self.very_weak_feedback = very_weak_feedback
+        self.only_noise = only_noise
+        self.only_residual_train = only_residual_train
+
+        self.only_compute_delta_norm = False
 
         if self.very_weak_feedback:
             self.weak_feedback = False
@@ -683,7 +690,7 @@ class Parrot(Initializable, Random):
     @application
     def compute_cost(
             self, features, features_mask, labels, labels_mask,
-            speaker, start_flag, batch_size, is_train = True):
+            speaker, start_flag, batch_size, is_train=True):
 
         if speaker is None:
             assert not self.use_speaker
@@ -731,13 +738,16 @@ class Parrot(Initializable, Random):
             gat_h2 += inp_gat_h2
             gat_h3 += inp_gat_h3
 
+        input_features = features[:-1]
         if self.weak_feedback:
-            input_features = features[:-1]
+            if self.only_noise:
+                input_features = tensor.zeros_like(input_features)
 
             if self.feedback_noise_level:
                 noise = self.theano_rng.normal(
                     size=input_features.shape,
                     avg=0., std=1.)
+                
                 input_features += self.noise_level_var * noise
 
             out_cell_h1, out_gat_h1 = self.out_to_h1.apply(input_features)
@@ -768,10 +778,15 @@ class Parrot(Initializable, Random):
         if self.very_weak_feedback:
             input_features = features[:-1]
 
+            if self.only_noise:
+                input_features = tensor.zeros_like(input_features)
+
+
             if self.feedback_noise_level:
                 noise = self.theano_rng.normal(
                     size=input_features.shape,
                     avg=0., std=1.)
+
                 input_features += self.noise_level_var * noise
 
             out_cell_h3, out_gat_h3 = self.out_to_h3_feedback.apply(input_features)
@@ -996,6 +1011,13 @@ class Parrot(Initializable, Random):
 
                     mutual_info = mutual_info.sum(axis=1).mean()
 
+            if self.only_compute_delta_norm:
+                predicted *= 0.
+
+            if self.only_residual_train:
+                predicted += input_features
+
+
 
 
             cost = tensor.sum((predicted - target_features) ** 2, axis=-1)
@@ -1005,6 +1027,8 @@ class Parrot(Initializable, Random):
             coeff = predicted
         elif self.which_cost == 'GMM':
             mu, sigma, coeff = predicted
+            if self.only_residual_train:
+                mu += input_features
             if self.use_speaker:
                 spk_to_out = self.speaker_to_output.apply(emb_speaker)
                 mu += spk_to_out[0]
@@ -1185,6 +1209,9 @@ class Parrot(Initializable, Random):
             gat_h2_t = inp_gat_h2_t
             gat_h3_t = inp_gat_h3_t
 
+            if self.only_noise:
+                x_tm1 = tensor.zeros_like(x_tm1)
+
             if self.labels_type == 'unaligned':
                 attinp_h1, attgat_h1 = self.inp_to_h1.apply(w_tm1)
                 cell_h1_t += attinp_h1
@@ -1327,6 +1354,13 @@ class Parrot(Initializable, Random):
                 if self.use_latent:
                     predicted_x_t += latent_output
 
+                if self.only_compute_delta_norm:
+                    predicted_x_t *= 0.
+                
+                if self.only_residual_train:
+                    predicted_x_t += x_tm1
+
+
                 # Dummy value for coeff_t
                 coeff_t = predicted_x_t
             elif self.which_cost == "GMM":
@@ -1340,6 +1374,9 @@ class Parrot(Initializable, Random):
                     mu_t += latent_output[0]
                     sigma_t += latent_output[1]
                     coeff_t += latent_output[2]
+
+                if self.only_residual_train:
+                    mu_t += x_tm1
 
                 sigma_t = tensor.exp(sigma_t - self.sampling_bias) + \
                     self.epsilon

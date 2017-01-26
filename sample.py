@@ -142,6 +142,7 @@ parrot_args = {
     'full_feedback': saved_args.full_feedback,
     'very_weak_feedback': saved_args.very_weak_feedback,
     'feedback_noise_level': None,
+    'only_noise': False,
     'layer_norm': saved_args.layer_norm,
     'use_speaker': saved_args.use_speaker,
     'num_speakers': saved_args.num_speakers,
@@ -154,6 +155,7 @@ parrot_args = {
     'sharpening_coeff': args.sharpening_coeff,
     'timing_coeff': args.timing_coeff,
     'encoder_type': saved_args.encoder_type,
+    'only_residual_train': args.only_residual_train,
     'name': 'parrot'}
 
 parrot = Parrot(**parrot_args)

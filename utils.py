@@ -171,6 +171,10 @@ def train_parse():
     parser.add_argument('--adaptive_noise', type=bool,
                         default=False,
                         help='whether to use adaptive noise')
+    parser.add_argument('--only_noise', type=bool,
+                        default=False,
+                        help='whether to use adaptive noise')
+
     parser.add_argument('--load_experiment', type=str,
                         default=None,
                         help='name of the experiment that will be loaded')
@@ -193,6 +197,8 @@ def train_parse():
                         help='save dir directory')
     parser.add_argument('--use_mutual_info', type=bool, default=False,
                         help='feedback to top layer')
+    parser.add_argument('--only_residual_train', type=bool, default=False,
+                        help='Only predict the deadline')
     parser.add_argument('--initial_iters', type=int, 
                         default=0,
                         help='Number of iterations already done')
@@ -268,6 +274,8 @@ def sample_parse():
     parser.add_argument('--random_speaker', type=bool,
                         default=False,
                         help='generate with random speaker')
+    parser.add_argument('--only_residual_train', type=bool, default=False,
+                        help='Only predict the deadline')
     parser.add_argument('--initial_iters', type=int, 
                         default=0,
                         help='Number of iterations already done')
