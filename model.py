@@ -401,7 +401,7 @@ class Parrot(Initializable, Random):
                 input_dim=levels*self.output_embed_dim,
                 output_dim=self.output_dim,
                 name="embed_to_usual")
-           self.children += [self.output_embed, self.embed_to_usual]
+            self.children += [self.output_embed, self.embed_to_usual]
 
         self.rnn1 = GatedRecurrent(dim=rnn_h_dim, name='rnn1')
         self.rnn2 = GatedRecurrent(dim=rnn_h_dim, name='rnn2')
