@@ -122,7 +122,7 @@ def sample_gmm(mu, sigma, weight, theano_rng):
     return result.reshape(shape_result, ndim=ndim_result)
 
 def sample_softmax(predicted, levels):
-    predicted_ = predicted.reshape(predicted.shape[:2] + [predicted.shape[2]//levels, levels])
+    predicted_ = predicted.reshape(predicted.shape[:2] + (predicted.shape[2]//levels, levels))
     predicted_reshaped = predicted_.reshape((-1, levels))
     predicted_levels = tensor.argmax(tensor.nnet.softmax(predicted_reshaped), axis=1)
     output = predicted_levels.reshape(predicted_.shape[:3])
@@ -130,7 +130,7 @@ def sample_softmax(predicted, levels):
 
 
 def compute_cce(predicted, ground_truth, levels):
-    predicted_ = predicted.reshape(predicted.shape[:2] + [predicted.shape[2]//levels, levels])
+    predicted_ = predicted.reshape(predicted.shape[:2] + (predicted.shape[2]//levels, levels))
     predicted_reshaped = predicted_.reshape((-1, levels))
 
     predicted_pvals = tensor.nnet.softmax(predicted_reshaped)
@@ -758,7 +758,8 @@ class Parrot(Initializable, Random):
 
         if self.quantized_input:
             features = self.output_embed.apply(features)
-            features = features.reshape(features.shape[:2] + [-1])
+            new_shape = [s for s in features.shape[:2]] + [self.levels*self.output_dim]
+            features = features.reshape(new_shape)
             features = self.embed_to_usual.apply(features)
 
         cell_shape = (mask.shape[0], batch_size, self.rnn_h_dim)
