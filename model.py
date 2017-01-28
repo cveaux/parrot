@@ -135,7 +135,7 @@ def compute_cce(predicted, ground_truth, levels):
 
     predicted_pvals = tensor.nnet.softmax(predicted_reshaped)
     cost = tensor.categorical_cross_entropy(predicted_pvals, ground_truth.flatten())
-    cost = cost.reshape(predicted_.shape[:3])
+    cost = cost.reshape(predicted_.shape[:3]).sum(axis= (cost.ndim - 1))
     return cost
 
 
@@ -1114,6 +1114,7 @@ class Parrot(Initializable, Random):
                 predicted += self.latent_to_output.apply(latent_var)
 
             cost = compute_cce(predicted, target_features, self.levels)
+            next_x = sample_softmax(predicted, self.levels)
 
         cost = (cost * mask).sum() / (mask.sum() + 1e-5) + 0. * start_flag
 
@@ -1155,7 +1156,7 @@ class Parrot(Initializable, Random):
         if self.quantized_input:
             initial_x = numpy.zeros(
                 (num_samples, self.output_dim), dtype=numpy.int32) + (self.levels - 1)//2
-            initial_x = self.input_embed.apply(initial_x)
+            initial_x = self.output_embed.apply(initial_x)
             initial_x = initial_x.reshape((initial_x.shape[0], -1))
             initial_x = self.embed_to_usual.apply(initial_x)
         else:
