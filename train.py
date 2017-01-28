@@ -59,7 +59,7 @@ b_init = initialization.Constant(0.)
 train_stream = parrot_stream(
     args.dataset, args.use_speaker, ('train',), args.batch_size,
     noise_level=args.feedback_noise_level, labels_type=args.labels_type,
-    seq_size=args.seq_size)
+    seq_size=args.seq_size, quantize_features=args.quantized_input)
 
 if args.feedback_noise_level is None:
     val_noise_level = None
@@ -69,7 +69,7 @@ else:
 valid_stream = parrot_stream(
     args.dataset, args.use_speaker, ('valid',), args.batch_size,
     noise_level=val_noise_level, labels_type=args.labels_type,
-    seq_size=10000)
+    seq_size=10000, quantize_features=args.quantized_input)
 
 example_batch = next(train_stream.get_epoch_iterator())
 
@@ -105,7 +105,8 @@ parrot_args = {
     'use_mutual_info': args.use_mutual_info,
     'initial_iters': args.initial_iters,
     'only_noise': args.only_noise,
-    'only_residual_train': args.only_residual_train}
+    'only_residual_train': args.only_residual_train,
+    'quantized_input': args.quantized_input}
 
 parrot = Parrot(**parrot_args)
 parrot.initialize()
@@ -115,7 +116,7 @@ features, features_mask, labels, labels_mask, speaker, latent_var, start_flag = 
 
 cost, extra_updates, attention_vars, kl_cost, mutual_info = parrot.compute_cost(
     features, features_mask, labels, labels_mask,
-    speaker, start_flag, args.batch_size, is_train = True)
+    speaker, start_flag, args.batch_size, is_train=True)
 
 cost_name = 'nll'
 cost.name = cost_name

@@ -13,7 +13,7 @@ import logging
 from blocks.serialization import load_parameters
 from blocks.model import Model
 
-from datasets import parrot_stream
+from datasets import parrot_stream, get_quantizers
 from model import Parrot
 from utils import (
     sample_parse, create_animation, numpy_one_hot)
@@ -83,7 +83,8 @@ else:
 
     test_stream = parrot_stream(
         args.dataset, saved_args.use_speaker, ('test',), args.num_samples,
-        args.num_steps, sorting_mult=1, labels_type=saved_args.labels_type)
+        args.num_steps, sorting_mult=1, labels_type=saved_args.labels_type,
+        quantized_input=saved_args.quantized_input)
 
     data_tr = next(test_stream.get_epoch_iterator())
     data_tr = {
@@ -156,6 +157,7 @@ parrot_args = {
     'timing_coeff': args.timing_coeff,
     'encoder_type': saved_args.encoder_type,
     'only_residual_train': args.only_residual_train,
+    'quantized_input': args.quantized_input,
     'name': 'parrot'}
 
 parrot = Parrot(**parrot_args)
@@ -195,6 +197,10 @@ else:
 print "Successfully sampled the parrot."
 
 gen_x = gen_x.swapaxes(0, 1)
+
+if saved_args.quantized_input:
+    _, dequantize = get_quantizers()
+    gen_x = dequantize(gen_x)
 
 if saved_args.labels_type in ['unaligned_phonemes', 'text']:
     from utils import full_plot

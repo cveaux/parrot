@@ -21,6 +21,14 @@ REFRESH_RATE = 100  # images per second
 SPTK_DIR = os.environ['SPTK_DIR']
 WORLD_DIR = os.environ['WORLD_DIR']
 
+def t_or_f(arg):
+    ua = str(arg).upper()
+    if 'TRUE'.startswith(ua):
+        return True
+    elif 'FALSE'.startswith(ua):
+        return False
+    else:
+       raise ValueError('Arg is neither `True` nor `False`')
 
 def numpy_one_hot(data, n_class=None):
     if n_class is None:
@@ -128,15 +136,15 @@ def train_parse():
                         help='size of time wise RNN hidden state')
     parser.add_argument('--readouts_dim', type=int, default=1024,
                         help='size of readouts')
-    parser.add_argument('--weak_feedback', type=bool, default=False,
+    parser.add_argument('--weak_feedback', type=t_or_f, default=False,
                         help='feedback to top layer')
-    parser.add_argument('--very_weak_feedback', type=bool, default=False,
+    parser.add_argument('--very_weak_feedback', type=t_or_f, default=False,
                         help='feedback to top layer')
-    parser.add_argument('--full_feedback', type=bool, default=False,
+    parser.add_argument('--full_feedback', type=t_or_f, default=False,
                         help='feedback to all layers')
     parser.add_argument('--feedback_noise_level', type=float, default=None,
                         help='how much noise in the feedback from audio')
-    parser.add_argument('--layer_norm', type=bool, default=False,
+    parser.add_argument('--layer_norm', type=t_or_f, default=False,
                         help='use simple layer normalization')
     parser.add_argument('--labels_type', type=str, default='full_labels',
                         help='which kind of labels to use: full or phoneme')
@@ -165,13 +173,13 @@ def train_parse():
     parser.add_argument('--grad_clip', type=float,
                         default=0.9,
                         help='how much to clip the gradients. for adam is 10x')
-    parser.add_argument('--lr_schedule', type=bool,
+    parser.add_argument('--lr_schedule', type=t_or_f,
                         default=False,
                         help='whether to use the learning rate schedule')
-    parser.add_argument('--adaptive_noise', type=bool,
+    parser.add_argument('--adaptive_noise', type=t_or_f,
                         default=False,
                         help='whether to use adaptive noise')
-    parser.add_argument('--only_noise', type=bool,
+    parser.add_argument('--only_noise', type=t_or_f,
                         default=False,
                         help='whether to use adaptive noise')
 
@@ -180,7 +188,7 @@ def train_parse():
                         help='name of the experiment that will be loaded')
     parser.add_argument('--time_limit', type=float, default=None,
                         help='time in hours that the model will run')
-    parser.add_argument('--use_speaker', type=bool,
+    parser.add_argument('--use_speaker', type=t_or_f,
                         default=False,
                         help='use speaker conditioning information')
     parser.add_argument('--num_speakers', type=int,
@@ -195,9 +203,9 @@ def train_parse():
     parser.add_argument('--save_dir', type=str,
                         default=os.environ['RESULTS_DIR'],
                         help='save dir directory')
-    parser.add_argument('--use_mutual_info', type=bool, default=False,
+    parser.add_argument('--use_mutual_info', type=t_or_f, default=False,
                         help='feedback to top layer')
-    parser.add_argument('--only_residual_train', type=bool, default=False,
+    parser.add_argument('--only_residual_train', type=t_or_f, default=False,
                         help='Only predict the deadline')
     parser.add_argument('--initial_iters', type=int, 
                         default=0,
@@ -241,7 +249,7 @@ def sample_parse():
     parser.add_argument('--dataset', type=str,
                         default='vctk',
                         help='which dataset to use')
-    parser.add_argument('--new_sentences', type=bool,
+    parser.add_argument('--new_sentences', type=t_or_f,
                         default=False,
                         help='Generate new sentences or sentences from valid')
     parser.add_argument('--save_dir', type=str,
@@ -253,30 +261,32 @@ def sample_parse():
     parser.add_argument('--world_dir', type=str,
                         default=WORLD_DIR,
                         help='save dir directory')
-    parser.add_argument('--process_originals', type=bool,
+    parser.add_argument('--process_originals', type=t_or_f,
                         default=False,
                         help='Process examples from the dataset or not')
-    parser.add_argument('--do_post_filtering', type=bool,
+    parser.add_argument('--do_post_filtering', type=t_or_f,
                         default=False,
                         help='do post filtering process')
-    parser.add_argument('--animation', type=bool,
+    parser.add_argument('--animation', type=t_or_f,
                         default=False,
                         help='wether to do animation or no')
-    parser.add_argument('--sample_one_step', type=bool,
+    parser.add_argument('--sample_one_step', type=t_or_f,
                         default=False,
                         help='wether to only sample one step or all')
-    parser.add_argument('--use_last', type=bool,
+    parser.add_argument('--use_last', type=t_or_f,
                         default=False,
                         help='wether to use the best parameters or last')
     parser.add_argument('--phrase', type=str,
                         default=None,
                         help='which phrase to generate')
-    parser.add_argument('--random_speaker', type=bool,
+    parser.add_argument('--random_speaker', type=t_or_f,
                         default=False,
                         help='generate with random speaker')
-    parser.add_argument('--only_residual_train', type=bool, default=False,
+    parser.add_argument('--only_residual_train', type=t_or_f, default=False,
                         help='Only predict the deadline')
-    parser.add_argument('--initial_iters', type=int, 
+    parser.add_argument('--quantized_input', type=t_or_f, default=False,
+                        help='Only predict the deadline')
+    parser.add_argument('--initial_iters', type=int,
                         default=0,
                         help='Number of iterations already done')
 

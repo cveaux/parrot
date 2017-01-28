@@ -121,6 +121,23 @@ def sample_gmm(mu, sigma, weight, theano_rng):
 
     return result.reshape(shape_result, ndim=ndim_result)
 
+def sample_softmax(predicted, levels):
+    predicted_ = predicted.reshape(predicted.shape[:2] + [predicted.shape[2]//levels, levels])
+    predicted_reshaped = predicted_.reshape((-1, levels))
+    predicted_levels = tensor.argmax(tensor.nnet.softmax(predicted_reshaped), axis=1)
+    output = predicted_levels.reshape(predicted_.shape[:3])
+    return output
+
+
+def compute_cce(predicted, ground_truth, levels):
+    predicted_ = predicted.reshape(predicted.shape[:2] + [predicted.shape[2]//levels, levels])
+    predicted_reshaped = predicted_.reshape((-1, levels))
+
+    predicted_pvals = tensor.nnet.softmax(predicted_reshaped)
+    cost = tensor.categorical_cross_entropy(predicted_pvals, ground_truth.flatten())
+    cost = cost.reshape(predicted_.shape[:3])
+    return cost
+
 
 class RecurrentWithFork(Initializable):
     # Obtained from Dima's code. @rizar
@@ -294,8 +311,9 @@ class Parrot(Initializable, Random):
             use_speaker=False,  # Condition on the speaker id?
             num_speakers=21,  # How many speakers there are?
             speaker_dim=128,  # Size of speaker embedding
-            which_cost='MSE',  # Train with MSE or GMM
+            which_cost='MSE',  # Train with MSE or GMM or CCE (categorical_cross_entropy)
             k_gmm=20,  # How many components in the GMM
+            levels=256,
             sampling_bias=0,  # Make samples more likely (Graves13)
             epsilon=1e-5,  # Numerical stabilities
             num_characters=43,  # how many chars in the labels
@@ -306,6 +324,7 @@ class Parrot(Initializable, Random):
             timing_coeff=1.,
             encoder_type=None,
             encoder_dim=128,
+            output_embed_dim=8,
             use_latent=True,
             latent_dim=64,
             initial_iters=0,
@@ -313,6 +332,7 @@ class Parrot(Initializable, Random):
             only_noise=False,
             only_residual_train=False,
             only_compute_delta_norm=True,
+            quantized_input=False,
             **kwargs):
 
         super(Parrot, self).__init__(**kwargs)
@@ -353,13 +373,16 @@ class Parrot(Initializable, Random):
 
         self.only_compute_delta_norm = False
 
+        self.quantized_input = quantized_input
+        self.output_embed_dim = output_embed_dim
+
         if self.very_weak_feedback:
             self.weak_feedback = False
             self.full_feedback = False
 
 
         """TODO: Verify wherever use_latent has been used"""
-        self.use_latent = use_latent       
+        self.use_latent = use_latent  
 
         if self.encoder_type == 'bidirectional':
             self.encoded_input_dim = 2 * encoder_dim
@@ -369,6 +392,16 @@ class Parrot(Initializable, Random):
 
         if self.feedback_noise_level is not None:
             self.noise_level_var = tensor.scalar('feedback_noise_level')
+
+        if self.quantized_input:
+            self.output_embed = LookupTable(
+                    levels,
+                    self.output_embed_dim,
+                    name='output_embed')
+            self.embed_to_usual = Linear(
+                input_dim=levels*self.output_embed_dim,
+                output_dim=self.output_dim,
+                name="embed_to_usual")
 
         self.rnn1 = GatedRecurrent(dim=rnn_h_dim, name='rnn1')
         self.rnn2 = GatedRecurrent(dim=rnn_h_dim, name='rnn2')
@@ -420,6 +453,12 @@ class Parrot(Initializable, Random):
                 output_names=['gmm_mu', 'gmm_sigma', 'gmm_coeff'],
                 input_dim=readouts_dim,
                 output_dims=[output_dim * k_gmm, output_dim * k_gmm, k_gmm],
+                name='readout_to_output')
+        elif which_cost == 'CCE':
+            self.levels = levels
+            self.readout_to_output = Linear(
+                input_dim=readouts_dim,
+                output_dim=output_dim,
                 name='readout_to_output')
 
         self.encoder = Encoder(
@@ -543,6 +582,11 @@ class Parrot(Initializable, Random):
                     output_dims=[
                         output_dim * k_gmm, output_dim * k_gmm, k_gmm],
                     name='speaker_to_output')
+            elif which_cost == 'CCE':
+                self.speaker_to_output = Linear(
+                    input_dim=speaker_dim,
+                    output_dim=output_dim*levels,
+                    name='speaker_to_output')
 
             self.children += [
                 self.embed_speaker,
@@ -578,8 +622,13 @@ class Parrot(Initializable, Random):
                     output_dims=[
                         output_dim * k_gmm, output_dim * k_gmm, k_gmm],
                     name='speaker_to_output')
+            elif which_cost == 'CCE':
+                self.latent_to_output = Linear(
+                    input_dim=latent_dim,
+                    output_dim=output_dim*levels,
+                    name='speaker_to_output')
 
-            self.children += [ 
+            self.children += [
                 self.latent_to_h,
                 self.latent_to_readout,
                 self.latent_to_output]
@@ -629,7 +678,10 @@ class Parrot(Initializable, Random):
         add_role(self.initial_w, INITIAL_STATE)
 
     def symbolic_input_variables(self):
-        features = tensor.tensor3('features')
+        if self.quantized_input:
+            features = tensor.itensor3('features')
+        else:
+            features = tensor.tensor3('features')
         features_mask = tensor.matrix('features_mask')
 
         if self.labels_type == 'full_labels':
@@ -703,6 +755,11 @@ class Parrot(Initializable, Random):
 
         target_features = features[1:]
         mask = features_mask[1:]
+
+        if self.quantized_input:
+            features = self.ouput_embed.apply(features)
+            features = features.reshape(features.shape[:2] + [-1])
+            features = self.embed_to_usual.apply(features)
 
         cell_shape = (mask.shape[0], batch_size, self.rnn_h_dim)
         gat_shape = (mask.shape[0], batch_size, 2 * self.rnn_h_dim)
@@ -1017,9 +1074,6 @@ class Parrot(Initializable, Random):
             if self.only_residual_train:
                 predicted += input_features
 
-
-
-
             cost = tensor.sum((predicted - target_features) ** 2, axis=-1)
 
             next_x = predicted
@@ -1052,7 +1106,16 @@ class Parrot(Initializable, Random):
             cost = cost_gmm(target_features, mu, sigma, coeff)
             next_x = sample_gmm(mu, sigma, coeff, self.theano_rng)
 
-        cost = (cost * mask).sum() / (mask.sum() + 1e-5) + 0. * start_flag 
+        elif self.which_cost == 'CCE':
+            if self.use_speaker:
+                predicted += self.speaker_to_output.apply(emb_speaker)
+
+            if self.use_latent:
+                predicted += self.latent_to_output.apply(latent_var)
+
+            cost = compute_cce(predicted, target_features, self.levels)
+
+        cost = (cost * mask).sum() / (mask.sum() + 1e-5) + 0. * start_flag
 
         if self.use_latent:
             iters = shared_floatx(self.initial_iters)
@@ -1089,8 +1152,15 @@ class Parrot(Initializable, Random):
             initial_w, last_w, initial_k, last_k = \
             self.initial_states(num_samples)
 
-        initial_x = numpy.zeros(
-            (num_samples, self.output_dim), dtype=floatX)
+        if self.quantized_input:
+            initial_x = numpy.zeros(
+                (num_samples, self.output_dim), dtype=numpy.int32) + (self.levels - 1)//2
+            initial_x = self.input_embed.apply(initial_x)
+            initial_x = initial_x.reshape((initial_x.shape[0], -1))
+            initial_x = self.embed_to_usual.apply(initial_x)
+        else:
+            initial_x = numpy.zeros(
+                (num_samples, self.output_dim), dtype=floatX)
 
         cell_shape = (seq_size, num_samples, self.rnn_h_dim)
         gat_shape = (seq_size, num_samples, 2 * self.rnn_h_dim)

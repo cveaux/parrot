@@ -5,7 +5,7 @@ from fuel.schemes import (
     ConstantScheme, ShuffledExampleScheme,
     SequentialExampleScheme)
 from fuel.transformers import (
-    AgnosticSourcewiseTransformer, Batch, Filter, FilterSources,
+    AgnosticSourcewiseTransformer, Batch, Filter, FilterSources, SourcewiseTransformer
     Mapping, Padding, Rename, SortMapping, Transformer, Unpack)
 from fuel.streams import DataStream
 
@@ -30,6 +30,36 @@ def _check_ratio(data, idx1, idx2, min_val, max_val):
     ratio = len(data[idx1]) / float(len(data[idx2]))
     # print (min_val <= ratio and ratio <= max_val)
     return (min_val <= ratio and ratio <= max_val)
+
+
+def get_quantizers(limit=5., quantisation='linear', levels=256):
+
+    def quantise(x):
+        assert(limit > 0.)
+        x[x > limit] = limit
+        x[x < -limit] = -limit
+
+        x = x+limit
+
+        if quantisation == 'linear':
+            x /= 2*limit
+        else:
+            raise NotImplementedError("{} quantisation not implemented!!".format(quantisation))
+
+        x = numpy.int32(x*levels - 0.00001)
+
+        return x
+
+    def dequantise(x):
+        x = numpy.float32(x + 0.5)/numpy.float32(levels)
+        if quantisation == 'linear':
+            x = x*2*limit - limit
+        else:
+            raise NotImplementedError("{} quantisation not implemented!!".format(quantisation))
+        return numpy.float32(x)
+
+    return quantise, dequantise
+
 
 
 class SegmentSequence(Transformer):
@@ -131,7 +161,6 @@ class SegmentSequence(Transformer):
 
         return tuple(segmented_data)
 
-
 class SourceMapping(AgnosticSourcewiseTransformer):
     """Apply a function to a subset of sources.
 
@@ -187,7 +216,7 @@ class VoiceData(H5PYDataset):
 def parrot_stream(
         voice, use_speaker=False, which_sets=('train',), batch_size=32,
         seq_size=50, num_examples=None, sorting_mult=4, noise_level=None,
-        labels_type='full_labels', check_ratio=True):
+        labels_type='full_labels', quantize_features=False, check_ratio=True):
 
     assert labels_type in [
         'full_labels', 'phonemes', 'unconditional',
@@ -249,6 +278,11 @@ def parrot_stream(
     data_stream = SourceMapping(
         data_stream, _transpose, which_sources=segment_sources)
 
+    if quantize_features:
+        quantize, _ = get_quantizers()
+        data_stream = SourceMapping(
+            data_stream, quantize, which_sources='features')
+
     data_stream = SegmentSequence(
         data_stream,
         seq_size=seq_size + 1,
@@ -263,17 +297,18 @@ def parrot_stream(
 
     return data_stream
 
+
 if __name__ == "__main__":
     data_stream = parrot_stream(
-        'dimex', labels_type='text', seq_size=10000,
-        batch_size=4000, sorting_mult=1, check_ratio=True)
+        'vctk', seq_size=10000,
+        batch_size=8)
 
     # print next(data_stream.get_epoch_iterator())[-1]
 
     # For Arctic, the ratio is 18 steps of features per letter.
-    data_tr = next(data_stream.get_epoch_iterator())
-    ratios = (data_tr[1].sum(0) / data_tr[3].sum(1))
-    print numpy.percentile(ratios, [0, 10, 25, 50, 75, 90, 99, 100])
+    # data_tr = next(data_stream.get_epoch_iterator())
+    # ratios = (data_tr[1].sum(0) / data_tr[3].sum(1))
+    # print numpy.percentile(ratios, [0, 10, 25, 50, 75, 90, 99, 100])
 
     # Arctic
     # phonemes: array([ 12.84, 14.75, 15.56, 16.82, 18.16, 19.89, 48.8])
@@ -286,3 +321,61 @@ if __name__ == "__main__":
     # VCTK
     # phonemes: array([  3., 12.39, 13.52, 15.03, 16.8, 18.96, 40.5])
     # text:     array([  2.04, 8.43, 9.23, 10.28, 11.56, 13.03, 23.15])
+
+    # ep_iter = data_stream.get_epoch_iterator()
+    # try:
+    #     data_batch = next(ep_iter)
+    #     features_reshaped = data_batch[0].reshape((-1, 63))
+    #     data_mask = data_batch[1].flatten()
+    #     features_useful = features_reshaped[data_mask == 1.]
+
+    #     import matplotlib
+    #     matplotlib.use("Agg")
+    #     from matplotlib import pyplot as plt
+    #     n, bins, patches = plt.hist(features_useful.flatten(), 256)
+    #     # plt.plot(bins, n, 'r--', linewidth=1)
+    #     plt.savefig("data_dist.jpg")
+    # except StopIteration:
+    #     print "Done processing data iterator"
+
+    ep_iter = data_stream.get_epoch_iterator()
+    data_batch = next(ep_iter)
+    SPTK_DIR = '/data/lisatmp4/kumarkun/merlin/tools/bin/SPTK-3.9/'
+    WORLD_DIR = '/data/lisatmp4/kumarkun/merlin/tools/bin/WORLD/'
+
+    norm_info_file = os.path.join(
+        os.environ['FUEL_DATA_PATH'], 'vctk',
+        'norm_info_mgc_lf0_vuv_bap_63_MVN.dat')
+
+    if not os.path.exists(os.path.join(os.environ['RESULTS_DIR'], 'vctk', 'actual_samples')):
+        os.makedirs(os.path.join(os.environ['RESULTS_DIR'], 'vctk', 'actual_samples'))
+
+    if not os.path.exists(os.path.join(os.environ['RESULTS_DIR'], 'vctk', 'normalisation_reconstructed')):
+        os.makedirs(os.path.join(os.environ['RESULTS_DIR'], 'vctk', 'normalisation_reconstructed'))
+
+
+    from generate import generate_wav
+    normalise, denormalise = get_quantizers(5)
+
+    for i, this_sample in enumerate(data_batch[0].transpose(1,0,2)):
+        this_sample = this_sample[:int(data_batch[1].sum(axis=0)[i])]
+
+        normalised_reconstructed_this = denormalise(normalise(this_sample))
+
+        generate_wav(
+            this_sample,
+            os.path.join(os.environ['RESULTS_DIR'], 'vctk', 'actual_samples'),
+            'sample' + '_' + str(i),
+            sptk_dir=SPTK_DIR,
+            world_dir=WORLD_DIR,
+            norm_info_file=norm_info_file,
+            do_post_filtering=False)
+
+        generate_wav(
+            normalised_reconstructed_this,
+            os.path.join(os.environ['RESULTS_DIR'], 'vctk', 'normalisation_reconstructed'),
+            'sample' + '_' + str(i),
+            sptk_dir=SPTK_DIR,
+            world_dir=WORLD_DIR,
+            norm_info_file=norm_info_file,
+            do_post_filtering=False)

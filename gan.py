@@ -408,7 +408,9 @@ output, last_hidden_dec = Decoder(latents, text_features, h0_dec, reset)
 
 disc_out, last_hidden_discriminator = discriminator(output, h0_discrim, mask)
 
-disc_positive_cost = (1.-fakeness)*T.log(disc_out + 0.00001) + fakeness*T.log(1 - disc_out + 0.00001)
+disc_out_data = 
+
+disc_positive_cost = T.nnet.binarycrossentropy(disc_out, fakeness)
 
 if LOSS == "GMM":
     mu, sigma, weights = split_output(output)
