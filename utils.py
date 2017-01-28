@@ -200,6 +200,8 @@ def train_parse():
     parser.add_argument('--dataset', type=str,
                         default='vctk',
                         help='which dataset to use')
+    parser.add_argument('--quantized_input', type=t_or_f, default=False,
+                        help='Only predict the deadline')
     parser.add_argument('--save_dir', type=str,
                         default=os.environ['RESULTS_DIR'],
                         help='save dir directory')

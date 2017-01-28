@@ -5,7 +5,7 @@ from fuel.schemes import (
     ConstantScheme, ShuffledExampleScheme,
     SequentialExampleScheme)
 from fuel.transformers import (
-    AgnosticSourcewiseTransformer, Batch, Filter, FilterSources, SourcewiseTransformer
+    AgnosticSourcewiseTransformer, Batch, Filter, FilterSources,
     Mapping, Padding, Rename, SortMapping, Transformer, Unpack)
 from fuel.streams import DataStream
 

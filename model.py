@@ -375,14 +375,13 @@ class Parrot(Initializable, Random):
 
         self.quantized_input = quantized_input
         self.output_embed_dim = output_embed_dim
-
         if self.very_weak_feedback:
             self.weak_feedback = False
             self.full_feedback = False
 
 
-        """TODO: Verify wherever use_latent has been used"""
-        self.use_latent = use_latent  
+        self.children = [] #TODO: Verify wherever use_latent has been used
+        self.use_latent = use_latent
 
         if self.encoder_type == 'bidirectional':
             self.encoded_input_dim = 2 * encoder_dim
@@ -402,6 +401,7 @@ class Parrot(Initializable, Random):
                 input_dim=levels*self.output_embed_dim,
                 output_dim=self.output_dim,
                 name="embed_to_usual")
+           self.children += [self.output_embed, self.embed_to_usual]
 
         self.rnn1 = GatedRecurrent(dim=rnn_h_dim, name='rnn1')
         self.rnn2 = GatedRecurrent(dim=rnn_h_dim, name='rnn2')
@@ -468,7 +468,7 @@ class Parrot(Initializable, Random):
             encoder_dim,
             name='encoder')
 
-        self.children = [
+        self.children += [
             self.encoder,
             self.rnn1,
             self.rnn2,
@@ -757,7 +757,7 @@ class Parrot(Initializable, Random):
         mask = features_mask[1:]
 
         if self.quantized_input:
-            features = self.ouput_embed.apply(features)
+            features = self.output_embed.apply(features)
             features = features.reshape(features.shape[:2] + [-1])
             features = self.embed_to_usual.apply(features)
 
