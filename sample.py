@@ -33,6 +33,17 @@ with open(os.path.join(
         args.experiment_name + '.pkl')) as f:
     saved_args = cPickle.load(f)
 
+# Set default values for old config files.
+if not hasattr(saved_args, 'weak_feedback'):
+    saved_args.weak_feedback = False
+if not hasattr(saved_args, 'full_feedback'):
+    saved_args.full_feedback = False
+if not hasattr(saved_args, 'very_weak_feedback'):
+    saved_args.full_feedback = False
+if not hasattr(saved_args, 'labels_type'):
+    saved_args.labels_type = 'full'
+if not hasattr(saved_args, 'quantized_input'):
+    saved_args.quantized_input = False
 
 if not os.path.exists(os.path.join(args.save_dir, "samples")):
     os.makedirs(os.path.join(args.save_dir, "samples"))
@@ -84,7 +95,7 @@ else:
     test_stream = parrot_stream(
         args.dataset, saved_args.use_speaker, ('test',), args.num_samples,
         args.num_steps, sorting_mult=1, labels_type=saved_args.labels_type,
-        quantized_input=saved_args.quantized_input)
+        quantize_features=saved_args.quantized_input)
 
     data_tr = next(test_stream.get_epoch_iterator())
     data_tr = {
@@ -123,15 +134,6 @@ if args.mix and saved_args.use_speaker:
         args.mix * parameters['/parrot/lookuptable.W'][10] + \
         (1 - args.mix) * parameters['/parrot/lookuptable.W'][11]
 
-# Set default values for old config files.
-if not hasattr(saved_args, 'weak_feedback'):
-    saved_args.weak_feedback = False
-if not hasattr(saved_args, 'full_feedback'):
-    saved_args.full_feedback = False
-if not hasattr(saved_args, 'very_weak_feedback'):
-    saved_args.full_feedback = False
-if not hasattr(saved_args, 'labels_type'):
-    saved_args.labels_type = 'full'
 
 parrot_args = {
     'input_dim': saved_args.input_dim,

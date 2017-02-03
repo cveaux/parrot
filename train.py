@@ -71,7 +71,7 @@ valid_stream = parrot_stream(
     noise_level=val_noise_level, labels_type=args.labels_type,
     seq_size=10000, quantize_features=args.quantized_input)
 
-example_batch = next(train_stream.get_epoch_iterator())
+example_batch = next(valid_stream.get_epoch_iterator())
 
 for idx, source in enumerate(train_stream.sources):
     if source not in ['start_flag', 'feedback_noise_level']:
@@ -106,7 +106,12 @@ parrot_args = {
     'initial_iters': args.initial_iters,
     'only_noise': args.only_noise,
     'only_residual_train': args.only_residual_train,
-    'quantized_input': args.quantized_input}
+    'residual_across_time': args.residual_across_time,
+    'quantized_input': args.quantized_input,
+    'zero_out_feedback': args.zero_out_feedback,
+    'fixed_zero_out_prob': args.fixed_zero_out_prob,
+    'zero_out_prob': args.zero_out_prob,
+    'zero_out_more_initially': args.zero_out_more_initially}
 
 parrot = Parrot(**parrot_args)
 parrot.initialize()

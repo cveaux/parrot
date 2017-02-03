@@ -6,6 +6,7 @@ from blocks.bricks.parallel import Fork
 from blocks.bricks.recurrent import GatedRecurrent, Bidirectional
 from blocks.roles import add_role, INITIAL_STATE
 from blocks.utils import shared_floatx_zeros, dict_union, shared_floatx
+from blocks.initialization import IsotropicGaussian, Uniform
 
 import numpy
 
@@ -122,20 +123,26 @@ def sample_gmm(mu, sigma, weight, theano_rng):
     return result.reshape(shape_result, ndim=ndim_result)
 
 def sample_softmax(predicted, levels):
-    predicted_ = predicted.reshape(predicted.shape[:2] + (predicted.shape[2]//levels, levels))
+    new_shape = [s for s in predicted.shape[:-1]]
+    new_shape.append(predicted.shape[-1]//levels)
+    new_shape.append(levels)
+    predicted_ = predicted.reshape(new_shape)
     predicted_reshaped = predicted_.reshape((-1, levels))
     predicted_levels = tensor.argmax(tensor.nnet.softmax(predicted_reshaped), axis=1)
-    output = predicted_levels.reshape(predicted_.shape[:3])
+    output = predicted_levels.reshape(predicted_.shape[:-1])
     return output
 
 
 def compute_cce(predicted, ground_truth, levels):
-    predicted_ = predicted.reshape(predicted.shape[:2] + (predicted.shape[2]//levels, levels))
+    new_shape = [s for s in predicted.shape[:2]]
+    new_shape.append(predicted.shape[2]//levels)
+    new_shape.append(levels)
+    predicted_ = predicted.reshape(new_shape)
     predicted_reshaped = predicted_.reshape((-1, levels))
 
     predicted_pvals = tensor.nnet.softmax(predicted_reshaped)
-    cost = tensor.categorical_cross_entropy(predicted_pvals, ground_truth.flatten())
-    cost = cost.reshape(predicted_.shape[:3]).sum(axis= (cost.ndim - 1))
+    cost = tensor.nnet.categorical_crossentropy(predicted_pvals, ground_truth.flatten())
+    cost = cost.reshape(predicted_.shape[:3])
     return cost
 
 
@@ -260,7 +267,8 @@ class LatentEncoder(Initializable):
                                     ],
                             input_dim=rnn_h_dim,
                             output_dims=[latent_dim, latent_dim],
-                            name='rnn_{}_to_mu_logsig'.format(num_layers)
+                            name='rnn_{}_to_mu_logsig'.format(num_layers),
+                            biases_init=Uniform(width=1.)
                         )
 
         self.children.append(mu_sig_fork)
@@ -324,7 +332,7 @@ class Parrot(Initializable, Random):
             timing_coeff=1.,
             encoder_type=None,
             encoder_dim=128,
-            output_embed_dim=8,
+            output_embed_dim=16,
             use_latent=True,
             latent_dim=64,
             initial_iters=0,
@@ -333,6 +341,11 @@ class Parrot(Initializable, Random):
             only_residual_train=False,
             only_compute_delta_norm=True,
             quantized_input=False,
+            residual_across_time=False,
+            zero_out_feedback=False,
+            zero_out_prob=0.0,
+            zero_out_more_initially=False,
+            fixed_zero_out_prob=False,
             **kwargs):
 
         super(Parrot, self).__init__(**kwargs)
@@ -351,6 +364,10 @@ class Parrot(Initializable, Random):
         self.full_feedback = full_feedback
         self.feedback_noise_level = feedback_noise_level
         self.epsilon = epsilon
+        self.zero_out_feedback = zero_out_feedback
+        self.zero_out_prob = zero_out_prob
+        self.zero_out_more_initially = zero_out_more_initially
+        self.fixed_zero_out_prob = fixed_zero_out_prob
 
         self.num_characters = num_characters
         self.attention_type = attention_type
@@ -375,6 +392,10 @@ class Parrot(Initializable, Random):
 
         self.quantized_input = quantized_input
         self.output_embed_dim = output_embed_dim
+        self.residual_across_time = residual_across_time
+
+        self.levels = levels
+
         if self.very_weak_feedback:
             self.weak_feedback = False
             self.full_feedback = False
@@ -382,6 +403,12 @@ class Parrot(Initializable, Random):
 
         self.children = [] #TODO: Verify wherever use_latent has been used
         self.use_latent = use_latent
+
+        if self.which_cost == 'CCE':
+            assert(self.quantized_input)
+
+        if self.quantized_input:
+            assert(self.which_cost == 'CCE')
 
         if self.encoder_type == 'bidirectional':
             self.encoded_input_dim = 2 * encoder_dim
@@ -398,7 +425,7 @@ class Parrot(Initializable, Random):
                     self.output_embed_dim,
                     name='output_embed')
             self.embed_to_usual = Linear(
-                input_dim=levels*self.output_embed_dim,
+                input_dim=self.output_dim*self.output_embed_dim,
                 output_dim=self.output_dim,
                 name="embed_to_usual")
             self.children += [self.output_embed, self.embed_to_usual]
@@ -458,7 +485,7 @@ class Parrot(Initializable, Random):
             self.levels = levels
             self.readout_to_output = Linear(
                 input_dim=readouts_dim,
-                output_dim=output_dim,
+                output_dim=output_dim*levels,
                 name='readout_to_output')
 
         self.encoder = Encoder(
@@ -750,6 +777,8 @@ class Parrot(Initializable, Random):
         if labels is None:
             assert self.labels_type == 'unconditional'
 
+        iters = shared_floatx(self.initial_iters)
+
         kl_cost = None
         mutual_info = None
 
@@ -758,7 +787,8 @@ class Parrot(Initializable, Random):
 
         if self.quantized_input:
             features = self.output_embed.apply(features)
-            new_shape = [s for s in features.shape[:2]] + [self.levels*self.output_dim]
+            new_shape = [s for s in features.shape[:2]] 
+            new_shape.append(self.output_embed_dim*self.output_dim)
             features = features.reshape(new_shape)
             features = self.embed_to_usual.apply(features)
 
@@ -797,6 +827,22 @@ class Parrot(Initializable, Random):
             gat_h3 += inp_gat_h3
 
         input_features = features[:-1]
+
+
+        if self.zero_out_feedback:
+            if self.fixed_zero_out_prob:
+                prob = 1. - self.zero_out_prob
+            elif self.zero_out_more_initially:
+                prob = 1. - (self.zero_out_prob/(1. + 1e-5*iters))
+            else:
+                prob = self.zero_out_prob/(1. + 1e-5*iters)
+
+            inp_mask = tensor.cast(self.theano_rng.binomial(size=(input_features.shape[0],), n=1, p=prob), floatX)
+            input_features = input_features*inp_mask[:, None, None]
+
+
+
+
         if self.weak_feedback:
             if self.only_noise:
                 input_features = tensor.zeros_like(input_features)
@@ -834,8 +880,6 @@ class Parrot(Initializable, Random):
             gat_h3 += out_gat_h3
 
         if self.very_weak_feedback:
-            input_features = features[:-1]
-
             if self.only_noise:
                 input_features = tensor.zeros_like(input_features)
 
@@ -1019,6 +1063,11 @@ class Parrot(Initializable, Random):
                 gat_h3_t + h1gat_h3 + h2gat_h3,
                 h3_tm1, iterate=False)
 
+            if self.residual_across_time:
+                h3_t = 0.5*h3_t + 0.5*h3_tm1
+                h2_t = 0.5*h2_t + 0.5*h2_tm1
+                h1_t = 0.5*h1_t + 0.5*h1_tm1
+
             return h1_t, h2_t, h3_t, k_t, w_t, phi_t, a_t_
 
         (h1, h2, h3, k, w, phi, pi_att), scan_updates = theano.scan(
@@ -1114,13 +1163,14 @@ class Parrot(Initializable, Random):
             if self.use_latent:
                 predicted += self.latent_to_output.apply(latent_var)
 
-            cost = compute_cce(predicted, target_features, self.levels)
+            cost = compute_cce(predicted, target_features, self.levels).sum(axis=-1)
             next_x = sample_softmax(predicted, self.levels)
+            coeff = predicted
 
         cost = (cost * mask).sum() / (mask.sum() + 1e-5) + 0. * start_flag
+        # cost = cost.mean()
 
         if self.use_latent:
-            iters = shared_floatx(self.initial_iters)
             # kl_coeff = iters/(iters + 5e5)
             kl_cost = kl_cost/(mask.sum() + 1e-5)
             # cost += kl_coeff*kl_cost
@@ -1135,12 +1185,12 @@ class Parrot(Initializable, Random):
         updates.append((last_h2, h2[-1]))
         updates.append((last_h3, h3[-1]))
 
-        if self.use_latent:
-            updates.append((iters, iters + 1.))
+        updates.append((iters, iters + 1.))
 
         if self.labels_type == 'unaligned':
             updates.append((last_k, k[-1]))
             updates.append((last_w, w[-1]))
+
 
         attention_vars = [next_x, k, w, coeff, phi, pi_att]
 
@@ -1156,10 +1206,7 @@ class Parrot(Initializable, Random):
 
         if self.quantized_input:
             initial_x = numpy.zeros(
-                (num_samples, self.output_dim), dtype=numpy.int32) + (self.levels - 1)//2
-            initial_x = self.output_embed.apply(initial_x)
-            initial_x = initial_x.reshape((initial_x.shape[0], -1))
-            initial_x = self.embed_to_usual.apply(initial_x)
+                (num_samples, self.output_dim), dtype=numpy.int64) + (self.levels - 1)//2
         else:
             initial_x = numpy.zeros(
                 (num_samples, self.output_dim), dtype=floatX)
@@ -1283,6 +1330,11 @@ class Parrot(Initializable, Random):
 
             if self.only_noise:
                 x_tm1 = tensor.zeros_like(x_tm1)
+
+            if self.quantized_input:
+                x_tm1 = self.output_embed.apply(x_tm1)
+                x_tm1 = x_tm1.reshape((x_tm1.shape[0], self.output_embed_dim*self.output_dim))
+                x_tm1 = self.embed_to_usual.apply(x_tm1)
 
             if self.labels_type == 'unaligned':
                 attinp_h1, attgat_h1 = self.inp_to_h1.apply(w_tm1)
@@ -1460,6 +1512,29 @@ class Parrot(Initializable, Random):
 
                 predicted_x_t = sample_gmm(
                     mu_t, sigma_t, coeff_t, self.theano_rng)
+            elif self.which_cost == "CCE":
+                predicted_x_t = output_t
+                if self.use_speaker:
+                    predicted_x_t += spk_output
+
+                if self.use_latent:
+                    predicted_x_t += latent_output
+
+                assert (not self.only_compute_delta_norm)
+                
+                
+                assert (not self.only_residual_train)
+
+                # Dummy value for coeff_t
+                coeff_t = output_t
+
+                predicted_x_t = sample_softmax(predicted_x_t, self.levels)
+
+            if self.residual_across_time:
+                h3_t = 0.5*h3_t + 0.5*h3_tm1
+                h2_t = 0.5*h2_t + 0.5*h2_tm1
+                h1_t = 0.5*h1_t + 0.5*h1_tm1
+                
 
             return predicted_x_t, h1_t, h2_t, h3_t, \
                 k_t, w_t, coeff_t, phi_t, a_t_

@@ -212,7 +212,21 @@ def train_parse():
     parser.add_argument('--initial_iters', type=int, 
                         default=0,
                         help='Number of iterations already done')
-
+    parser.add_argument('--residual_across_time', type=t_or_f, 
+                        default=False,
+                        help='Whether to have a residual connection across hidden state')
+    parser.add_argument('--zero_out_feedback', type=t_or_f,
+                        default=False,
+                        help="Whether to zero_out some of the input in the feedback")
+    parser.add_argument('--zero_out_prob', type=numpy.float32,
+                        default=0.0,
+                        help="Initial probability of zeroing out some of the input in the feedback")
+    parser.add_argument('--zero_out_more_initially', type=t_or_f,
+                        default=False,
+                        help="Whether to decrease or increase zeroing out rate as the training progresses")
+    parser.add_argument('--fixed_zero_out_prob', type=t_or_f,
+                        default=False,
+                        help="Whether to keep fixed zeroing out prob to its initial value")
 
     args = parser.parse_args()
     if args.dataset not in args.save_dir:

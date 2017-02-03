@@ -301,7 +301,8 @@ def parrot_stream(
 if __name__ == "__main__":
     data_stream = parrot_stream(
         'vctk', seq_size=10000,
-        batch_size=8)
+        batch_size=7843)
+
 
     # print next(data_stream.get_epoch_iterator())[-1]
 
@@ -322,60 +323,69 @@ if __name__ == "__main__":
     # phonemes: array([  3., 12.39, 13.52, 15.03, 16.8, 18.96, 40.5])
     # text:     array([  2.04, 8.43, 9.23, 10.28, 11.56, 13.03, 23.15])
 
-    # ep_iter = data_stream.get_epoch_iterator()
-    # try:
-    #     data_batch = next(ep_iter)
-    #     features_reshaped = data_batch[0].reshape((-1, 63))
-    #     data_mask = data_batch[1].flatten()
-    #     features_useful = features_reshaped[data_mask == 1.]
-
-    #     import matplotlib
-    #     matplotlib.use("Agg")
-    #     from matplotlib import pyplot as plt
-    #     n, bins, patches = plt.hist(features_useful.flatten(), 256)
-    #     # plt.plot(bins, n, 'r--', linewidth=1)
-    #     plt.savefig("data_dist.jpg")
-    # except StopIteration:
-    #     print "Done processing data iterator"
-
     ep_iter = data_stream.get_epoch_iterator()
-    data_batch = next(ep_iter)
-    SPTK_DIR = '/data/lisatmp4/kumarkun/merlin/tools/bin/SPTK-3.9/'
-    WORLD_DIR = '/data/lisatmp4/kumarkun/merlin/tools/bin/WORLD/'
+    try:
+        data_batch = next(ep_iter)
+        features_reshaped = data_batch[0].reshape((-1, 63))
+        data_mask = data_batch[1].flatten()
+        features_useful = features_reshaped[data_mask == 1.]
 
-    norm_info_file = os.path.join(
-        os.environ['FUEL_DATA_PATH'], 'vctk',
-        'norm_info_mgc_lf0_vuv_bap_63_MVN.dat')
+        import matplotlib
+        matplotlib.use("Agg")
+        from matplotlib import pyplot as plt
+        means = features_useful.mean(axis=0)
+        stds = features_useful.std(axis=0)
+        # n, bins, patches = plt.hist(features_useful.flatten(), 256)
+        # plt.plot(bins, n, 'r--', linewidth=1)
+        plt.plot(numpy.arange(len(means)), means, '.r')
+        plt.plot(numpy.arange(len(stds)), stds, '.b')
+        for i in range(len(means)):
+            count_i = len(numpy.unique(features_useful[:,i]))
+            if count_i > 5:
+                count_i = 5.
+            plt.plot(i, count_i, '.g')
+        plt.savefig("data_dim_dist.jpg")
+    except StopIteration:
+        print "Done processing data iterator"
 
-    if not os.path.exists(os.path.join(os.environ['RESULTS_DIR'], 'vctk', 'actual_samples')):
-        os.makedirs(os.path.join(os.environ['RESULTS_DIR'], 'vctk', 'actual_samples'))
+    # ep_iter = data_stream.get_epoch_iterator()
+    # data_batch = next(ep_iter)
+    # SPTK_DIR = '/data/lisatmp4/kumarkun/merlin/tools/bin/SPTK-3.9/'
+    # WORLD_DIR = '/data/lisatmp4/kumarkun/merlin/tools/bin/WORLD/'
 
-    if not os.path.exists(os.path.join(os.environ['RESULTS_DIR'], 'vctk', 'normalisation_reconstructed')):
-        os.makedirs(os.path.join(os.environ['RESULTS_DIR'], 'vctk', 'normalisation_reconstructed'))
+    # norm_info_file = os.path.join(
+    #     os.environ['FUEL_DATA_PATH'], 'vctk',
+    #     'norm_info_mgc_lf0_vuv_bap_63_MVN.dat')
+
+    # if not os.path.exists(os.path.join(os.environ['RESULTS_DIR'], 'vctk', 'actual_samples')):
+    #     os.makedirs(os.path.join(os.environ['RESULTS_DIR'], 'vctk', 'actual_samples'))
+
+    # if not os.path.exists(os.path.join(os.environ['RESULTS_DIR'], 'vctk', 'normalisation_reconstructed')):
+    #     os.makedirs(os.path.join(os.environ['RESULTS_DIR'], 'vctk', 'normalisation_reconstructed'))
 
 
-    from generate import generate_wav
-    normalise, denormalise = get_quantizers(5)
+    # from generate import generate_wav
+    # normalise, denormalise = get_quantizers(5)
 
-    for i, this_sample in enumerate(data_batch[0].transpose(1,0,2)):
-        this_sample = this_sample[:int(data_batch[1].sum(axis=0)[i])]
+    # for i, this_sample in enumerate(data_batch[0].transpose(1,0,2)):
+    #     this_sample = this_sample[:int(data_batch[1].sum(axis=0)[i])]
 
-        normalised_reconstructed_this = denormalise(normalise(this_sample))
+    #     normalised_reconstructed_this = denormalise(normalise(this_sample))
 
-        generate_wav(
-            this_sample,
-            os.path.join(os.environ['RESULTS_DIR'], 'vctk', 'actual_samples'),
-            'sample' + '_' + str(i),
-            sptk_dir=SPTK_DIR,
-            world_dir=WORLD_DIR,
-            norm_info_file=norm_info_file,
-            do_post_filtering=False)
+    #     generate_wav(
+    #         this_sample,
+    #         os.path.join(os.environ['RESULTS_DIR'], 'vctk', 'actual_samples'),
+    #         'sample' + '_' + str(i),
+    #         sptk_dir=SPTK_DIR,
+    #         world_dir=WORLD_DIR,
+    #         norm_info_file=norm_info_file,
+    #         do_post_filtering=False)
 
-        generate_wav(
-            normalised_reconstructed_this,
-            os.path.join(os.environ['RESULTS_DIR'], 'vctk', 'normalisation_reconstructed'),
-            'sample' + '_' + str(i),
-            sptk_dir=SPTK_DIR,
-            world_dir=WORLD_DIR,
-            norm_info_file=norm_info_file,
-            do_post_filtering=False)
+    #     generate_wav(
+    #         normalised_reconstructed_this,
+    #         os.path.join(os.environ['RESULTS_DIR'], 'vctk', 'normalisation_reconstructed'),
+    #         'sample' + '_' + str(i),
+    #         sptk_dir=SPTK_DIR,
+    #         world_dir=WORLD_DIR,
+    #         norm_info_file=norm_info_file,
+    #         do_post_filtering=False)
