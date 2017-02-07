@@ -216,7 +216,7 @@ class VoiceData(H5PYDataset):
 def parrot_stream(
         voice, use_speaker=False, which_sets=('train',), batch_size=32,
         seq_size=50, num_examples=None, sorting_mult=4, noise_level=None,
-        labels_type='full_labels', quantize_features=False, check_ratio=True):
+        labels_type='full_labels', quantize_features=False, check_ratio=True, raw_audio=False):
 
     assert labels_type in [
         'full_labels', 'phonemes', 'unconditional',
@@ -229,12 +229,16 @@ def parrot_stream(
     if not num_examples:
         num_examples = dataset.num_examples
 
+    # print num_examples
+
     if 'train' in which_sets:
         scheme = ShuffledExampleScheme(num_examples)
     else:
         scheme = SequentialExampleScheme(num_examples)
 
     data_stream = DataStream.default_stream(dataset, iteration_scheme=scheme)
+
+    # print data_stream.sources
 
     if check_ratio and labels_type in ['unaligned_phonemes', 'text']:
         idx = data_stream.sources.index(labels_type)
@@ -245,6 +249,9 @@ def parrot_stream(
 
     segment_sources = ('features', 'features_mask')
     all_sources = segment_sources
+
+    if raw_audio:
+        all_sources += ('raw_audio', )
 
     if labels_type != 'unconditional':
         all_sources += ('labels', )
@@ -299,9 +306,10 @@ def parrot_stream(
 
 
 if __name__ == "__main__":
-    data_stream = parrot_stream(
-        'vctk', seq_size=10000,
-        batch_size=7843)
+    data_stream = parrot_stream('dimex', labels_type='text', seq_size=20,batch_size=5, raw_audio=True)
+    print data_stream.sources
+    # exit()
+    import ipdb; ipdb.set_trace()
 
 
     # print next(data_stream.get_epoch_iterator())[-1]

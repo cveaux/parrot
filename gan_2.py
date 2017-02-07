@@ -126,7 +126,7 @@ def get_args():
 
 args, tag = get_args()
 
-FOLDER_PREFIX = '/Tmp/kumarkun/vocoder_gan/{}'.format(args.exp_name)
+FOLDER_PREFIX = '/Tmp/kumarkun/vocoder_wgan/{}'.format(args.exp_name)
 GRAD_CLIP = args.grad_clip
 LEARNING_RATE = args.lr
 
@@ -352,7 +352,9 @@ disc_out_gen = discriminator(output, mask)
 disc_out_data = discriminator(vocoder_audio, mask)
 
 disc_cost = (T.nnet.softplus(disc_out_gen) + T.nnet.softplus(-disc_out_data)).mean()
-gen_cost =  (T.nnet.softplus(-disc_out_gen) + T.nnet.softplus(disc_out_data)).mean()
+gen_cost = (T.nnet.softplus(-disc_out_gen) + T.nnet.softplus(disc_out_data)).mean()
+
+# gen_cost = 
 
 samples = output
 cost_raw = T.sum((samples - vocoder_audio) ** 2, axis=-1)

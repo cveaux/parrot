@@ -224,9 +224,19 @@ def train_parse():
     parser.add_argument('--zero_out_more_initially', type=t_or_f,
                         default=False,
                         help="Whether to decrease or increase zeroing out rate as the training progresses")
+    parser.add_argument('--use_last', type=t_or_f,
+                        default=False,
+                        help='wether to use the best parameters or last')
     parser.add_argument('--fixed_zero_out_prob', type=t_or_f,
                         default=False,
                         help="Whether to keep fixed zeroing out prob to its initial value")
+    parser.add_argument('--use_scheduled_sampling', type=t_or_f,
+                        default=False,
+                        help="Whether to use sampled output at train time")
+    parser.add_argument('--use_latent', type=t_or_f,
+                        default=True,
+                        help="Whether to use latent variables")
+
 
     args = parser.parse_args()
     if args.dataset not in args.save_dir:

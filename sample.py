@@ -44,6 +44,8 @@ if not hasattr(saved_args, 'labels_type'):
     saved_args.labels_type = 'full'
 if not hasattr(saved_args, 'quantized_input'):
     saved_args.quantized_input = False
+if not hasattr(saved_args, 'use_latent'):
+    saved_args.use_latent = True
 
 if not os.path.exists(os.path.join(args.save_dir, "samples")):
     os.makedirs(os.path.join(args.save_dir, "samples"))
@@ -160,7 +162,9 @@ parrot_args = {
     'encoder_type': saved_args.encoder_type,
     'only_residual_train': args.only_residual_train,
     'quantized_input': args.quantized_input,
+    'use_latent': saved_args.use_latent,
     'name': 'parrot'}
+
 
 parrot = Parrot(**parrot_args)
 

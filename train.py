@@ -35,6 +35,10 @@ if args.algorithm == "adasecant":
 exp_name = args.experiment_name
 save_dir = args.save_dir
 
+if args.use_last:
+    load_prefix = "last_"
+else:
+    load_prefix = "best_"
 
 if not os.path.exists(save_dir):
     os.makedirs(save_dir)
@@ -111,6 +115,8 @@ parrot_args = {
     'zero_out_feedback': args.zero_out_feedback,
     'fixed_zero_out_prob': args.fixed_zero_out_prob,
     'zero_out_prob': args.zero_out_prob,
+    'use_scheduled_sampling': args.use_scheduled_sampling,
+    'use_latent': args.use_latent,
     'zero_out_more_initially': args.zero_out_more_initially}
 
 parrot = Parrot(**parrot_args)
@@ -119,7 +125,13 @@ parrot.initialize()
 features, features_mask, labels, labels_mask, speaker, latent_var, start_flag = \
     parrot.symbolic_input_variables()
 
-cost, extra_updates, attention_vars, kl_cost, mutual_info = parrot.compute_cost(
+
+if parrot.use_scheduled_sampling:
+    compute_cost = parrot.schedule_cost
+else:
+    compute_cost = parrot.compute_cost
+
+cost, extra_updates, attention_vars, kl_cost, mutual_info = compute_cost(
     features, features_mask, labels, labels_mask,
     speaker, start_flag, args.batch_size, is_train=True)
 
@@ -211,7 +223,7 @@ extensions = []
 
 if args.load_experiment and (not worker or worker.is_main_worker):
     extensions += [Load(os.path.join(
-        save_dir, "pkl", "best_" + args.load_experiment + ".tar"))]
+        save_dir, "pkl", load_prefix + args.load_experiment + ".tar"))]
 
 extensions += [
     Timing(every_n_batches=args.save_every),

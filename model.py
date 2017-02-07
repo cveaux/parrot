@@ -11,6 +11,7 @@ from blocks.initialization import IsotropicGaussian, Uniform
 import numpy
 
 import theano
+# theano.config.compute_test_value = 'warn'
 from theano import tensor, function
 
 floatX = theano.config.floatX
@@ -343,9 +344,10 @@ class Parrot(Initializable, Random):
             quantized_input=False,
             residual_across_time=False,
             zero_out_feedback=False,
-            zero_out_prob=0.0,
+            zero_out_prob=0.0,  # prob for zeroing out or schedule sampling
             zero_out_more_initially=False,
             fixed_zero_out_prob=False,
+            use_scheduled_sampling=False,
             **kwargs):
 
         super(Parrot, self).__init__(**kwargs)
@@ -393,6 +395,8 @@ class Parrot(Initializable, Random):
         self.quantized_input = quantized_input
         self.output_embed_dim = output_embed_dim
         self.residual_across_time = residual_across_time
+
+        self.use_scheduled_sampling = use_scheduled_sampling
 
         self.levels = levels
 
@@ -770,6 +774,10 @@ class Parrot(Initializable, Random):
     def compute_cost(
             self, features, features_mask, labels, labels_mask,
             speaker, start_flag, batch_size, is_train=True):
+
+        if self.use_scheduled_sampling:
+            return self.schedule_cost(features, features_mask, labels, labels_mask,
+            speaker, start_flag, batch_size, is_train)
 
         if speaker is None:
             assert not self.use_speaker
@@ -1520,9 +1528,7 @@ class Parrot(Initializable, Random):
                 if self.use_latent:
                     predicted_x_t += latent_output
 
-                assert (not self.only_compute_delta_norm)
-                
-                
+                assert (not self.only_compute_delta_norm)                
                 assert (not self.only_residual_train)
 
                 # Dummy value for coeff_t
@@ -1625,3 +1631,840 @@ class Parrot(Initializable, Random):
         return function(
             theano_inputs, [sample_x, k, w, pi, phi, pi_att],
             updates=updates)(*numpy_inputs)
+
+    @application
+    def schedule_cost(
+            self, features, features_mask, labels, labels_mask,
+            speaker, start_flag, batch_size, is_train=True):
+
+        if speaker is None:
+            assert not self.use_speaker
+
+        if labels is None:
+            assert self.labels_type == 'unconditional'
+
+        iters = shared_floatx(self.initial_iters)
+
+        kl_cost = None
+        mutual_info = None
+
+        target_features = features[1:]
+        mask = features_mask[1:]
+
+        if self.quantized_input:
+            features = self.output_embed.apply(features)
+            new_shape = [s for s in features.shape[:2]]
+            new_shape.append(self.output_embed_dim*self.output_dim)
+            features = features.reshape(new_shape)
+            features = self.embed_to_usual.apply(features)
+
+        cell_shape = (mask.shape[0], batch_size, self.rnn_h_dim)
+        gat_shape = (mask.shape[0], batch_size, 2 * self.rnn_h_dim)
+        cell_h1 = tensor.zeros(cell_shape, dtype=floatX)
+        cell_h2 = tensor.zeros(cell_shape, dtype=floatX)
+        cell_h3 = tensor.zeros(cell_shape, dtype=floatX)
+        gat_h1 = tensor.zeros(gat_shape, dtype=floatX)
+        gat_h2 = tensor.zeros(gat_shape, dtype=floatX)
+        gat_h3 = tensor.zeros(gat_shape, dtype=floatX)
+
+        if self.labels_type not in ['unconditional', 'unaligned']:
+            labels = labels[1:]
+
+            if self.labels_type == 'phonemes':
+                labels = self.embed_label.apply(labels)
+
+            inp_cell_h1, inp_gat_h1 = self.inp_to_h1.apply(labels)
+            inp_cell_h2, inp_gat_h2 = self.inp_to_h2.apply(labels)
+            inp_cell_h3, inp_gat_h3 = self.inp_to_h3.apply(labels)
+
+            to_normalize = [
+                inp_cell_h1, inp_gat_h1, inp_cell_h2, inp_gat_h2,
+                inp_cell_h3, inp_gat_h3]
+
+            inp_cell_h1, inp_gat_h1, inp_cell_h2, inp_gat_h2, \
+                inp_cell_h3, inp_gat_h3 = \
+                [_apply_norm(x, self.layer_norm) for x in to_normalize]
+
+            cell_h1 += inp_cell_h1
+            cell_h2 += inp_cell_h2
+            cell_h3 += inp_cell_h3
+            gat_h1 += inp_gat_h1
+            gat_h2 += inp_gat_h2
+            gat_h3 += inp_gat_h3
+
+        input_features = features[:-1]
+        if (self.weak_feedback or self.very_weak_feedback) or self.full_feedback:
+            if self.feedback_noise_level:
+                noise = self.theano_rng.normal(
+                    size=input_features.shape,
+                    avg=0., std=1.)
+                
+                input_features += self.noise_level_var * noise
+
+        if self.zero_out_feedback:
+            if self.fixed_zero_out_prob:
+                prob = 1. - self.zero_out_prob
+            elif self.zero_out_more_initially:
+                prob = 1. - (self.zero_out_prob/(1. + 1e-5*iters))
+            else:
+                prob = self.zero_out_prob/(1. + 1e-5*iters)
+
+            inp_mask = tensor.cast(self.theano_rng.binomial(size=(input_features.shape[0],), n=1, p=prob), floatX)
+            input_features = input_features*inp_mask[:, None, None]
+
+
+
+        if self.use_speaker:
+            speaker = speaker[:, 0]
+            emb_speaker = self.embed_speaker.apply(speaker)
+            emb_speaker_padded = tensor.shape_padleft(emb_speaker)
+
+            spk_cell_h1, spk_gat_h1 = self.speaker_to_h1.apply(emb_speaker_padded)
+            spk_cell_h2, spk_gat_h2 = self.speaker_to_h2.apply(emb_speaker_padded)
+            spk_cell_h3, spk_gat_h3 = self.speaker_to_h3.apply(emb_speaker_padded)
+
+            to_normalize = [
+                spk_cell_h1, spk_gat_h1, spk_cell_h2, spk_gat_h2,
+                spk_cell_h3, spk_gat_h3]
+
+            spk_cell_h1, spk_gat_h1, spk_cell_h2, spk_gat_h2, \
+                spk_cell_h3, spk_gat_h3, = \
+                [_apply_norm(x, self.layer_norm) for x in to_normalize]
+
+            cell_h1 = spk_cell_h1 + cell_h1
+            cell_h2 = spk_cell_h2 + cell_h2
+            cell_h3 = spk_cell_h3 + cell_h3
+            gat_h1 = spk_gat_h1 + gat_h1
+            gat_h2 = spk_gat_h2 + gat_h2
+            gat_h3 = spk_gat_h3 + gat_h3
+
+        if self.use_latent:
+            mu, log_sig = self.latent_encoder.apply(features, features_mask)
+            e = tensor.cast(self.theano_rng.normal(mu.shape), floatX)
+
+            latent_var = mu + e*(tensor.exp(log_sig) + self.epsilon)
+
+            kl_cost = kl_unit_gaussian(mu, log_sig).sum(axis=1)
+
+            kl_cost = kl_cost.mean()
+
+            latent_var_padded = tensor.shape_padleft(latent_var)
+
+
+            latent_cell_h1, latent_gat_h1, latent_cell_h2, \
+                latent_gat_h2, latent_cell_h3, latent_gat_h3 = self.latent_to_h.apply(latent_var_padded)
+
+            # to_normalize = [
+            #     latent_cell_h1, latent_gat_h1, latent_cell_h2,
+            #     latent_gat_h2, latent_cell_h3, latent_gat_h3 ]
+
+            # latent_cell_h1, latent_gat_h1, latent_cell_h2, \
+            #     latent_gat_h2, latent_cell_h3, latent_gat_h3 = \
+            #     [_apply_norm(x, self.layer_norm) for x in to_normalize]
+
+            cell_h1 = latent_cell_h1 + cell_h1
+            cell_h2 = latent_cell_h2 + cell_h2
+            cell_h3 = latent_cell_h3 + cell_h3
+            gat_h1 = latent_gat_h1 + gat_h1
+            gat_h2 = latent_gat_h2 + gat_h2
+            gat_h3 = latent_gat_h3 + gat_h3
+
+
+
+        initial_h1, last_h1, initial_h2, last_h2, initial_h3, last_h3, \
+            initial_w, last_w, initial_k, last_k = \
+            self.initial_states(batch_size)
+
+        # If it's a new example, use initial states.
+        input_h1 = tensor.switch(
+            start_flag, initial_h1, last_h1)
+        input_h2 = tensor.switch(
+            start_flag, initial_h2, last_h2)
+        input_h3 = tensor.switch(
+            start_flag, initial_h3, last_h3)
+        input_w = tensor.switch(
+            start_flag, initial_w, last_w)
+        input_k = tensor.switch(
+            start_flag, initial_k, last_k)
+
+        if self.labels_type == 'unaligned':
+            # TODO: include context_oh as context in the step function.
+            if self.encoder_type is None:
+                context_oh = one_hot(labels, self.num_characters) * \
+                    tensor.shape_padright(labels_mask)
+            elif self.encoder_type == 'bidirectional':
+                context_oh = self.encoder.apply(labels) * \
+                    tensor.shape_padright(labels_mask)
+
+            u = tensor.shape_padleft(
+                tensor.arange(labels.shape[1], dtype=floatX), 2)
+
+        if self.quantized_input:
+            initial_x = numpy.zeros(
+                (batch_size, self.output_dim), dtype=numpy.int64) + (self.levels - 1)//2
+        else:
+            initial_x = numpy.zeros(
+                (batch_size, self.output_dim), dtype=floatX)
+
+
+        readout_sum = 0.
+        output_sum = 0.
+
+        if self.use_speaker:
+            readout_sum += self.speaker_to_readout.apply(emb_speaker)
+            output_sum += self.speaker_to_output.apply(emb_speaker)
+
+
+        if self.use_latent:
+            readout_sum += self.latent_to_readout.apply(latent_var)
+            output_sum += self.latent_to_output.apply(latent_var)
+
+
+        sampled_prob = 1 - self.zero_out_prob/(1. + 1e-5*iters)
+        use_sampled = tensor.cast(self.theano_rng.binomial(size=(mask.shape[0], batch_size), n=1, p=sampled_prob), floatX)
+
+
+        def step(
+                inp_h1_t, gat_h1_t, inp_h2_t, gat_h2_t, inp_h3_t, gat_h3_t, use_sampled_t, inp_tm1, x_tm1,
+                h1_tm1, h2_tm1, h3_tm1, k_tm1, w_tm1, context_oh, readout_sum, output_sum):
+
+
+            x_tm1 = x_tm1*use_sampled_t[:, None] + inp_tm1*(1 - use_sampled_t)[:,None]
+
+            if self.weak_feedback:
+
+                out_cell_h1, out_gat_h1 = self.out_to_h1.apply(x_tm1)
+
+                to_normalize = [
+                    out_cell_h1, out_gat_h1]
+                out_cell_h1, out_gat_h1 = \
+                    [_apply_norm(x, self.layer_norm) for x in to_normalize]
+
+                inp_h1_t += out_cell_h1
+                gat_h1_t += out_gat_h1
+
+            if self.full_feedback:
+                assert self.weak_feedback
+                out_cell_h2, out_gat_h2 = self.out_to_h2.apply(x_tm1)
+                out_cell_h3, out_gat_h3 = self.out_to_h3.apply(x_tm1)
+
+                to_normalize = [
+                    out_cell_h2, out_gat_h2, out_cell_h3, out_gat_h3]
+                out_cell_h2, out_gat_h2, out_cell_h3, out_gat_h3 = \
+                    [_apply_norm(x, self.layer_norm) for x in to_normalize]
+
+                inp_h2_t += out_cell_h2
+                gat_h2_t += out_gat_h2
+                inp_h3_t += out_cell_h3
+                gat_h3_t += out_gat_h3
+
+            if self.very_weak_feedback:
+                out_cell_h3, out_gat_h3 = self.out_to_h3_feedback.apply(x_tm1)
+                to_normalize = [out_cell_h3, out_gat_h3]
+                out_cell_h3, out_gat_h3 = \
+                    [_apply_norm(x, self.layer_norm) for x in to_normalize]
+                inp_h3_t += out_cell_h3
+                gat_h3_t += out_gat_h3
+
+            if self.labels_type == 'unaligned':
+                attinp_h1, attgat_h1 = self.inp_to_h1.apply(w_tm1)
+                inp_h1_t += attinp_h1
+                gat_h1_t += attgat_h1
+
+            h1_t = self.rnn1.apply(
+                inp_h1_t,
+                gat_h1_t,
+                h1_tm1, iterate=False)
+
+            if self.labels_type == 'unaligned':
+                a_t, b_t, k_t = self.h1_to_att.apply(h1_t)
+
+                if self.attention_type == "softmax":
+                    a_t = tensor.nnet.softmax(a_t) + self.epsilon
+                else:
+                    a_t = tensor.exp(a_t) + self.epsilon
+
+                b_t = tensor.exp(b_t) + self.epsilon
+                k_t = k_tm1 + self.attention_alignment * tensor.exp(k_t)
+
+                a_t_ = a_t
+                a_t = tensor.shape_padright(a_t)
+                b_t = tensor.shape_padright(b_t)
+                k_t_ = tensor.shape_padright(k_t)
+
+                # batch size X att size X len context
+                if self.attention_type == "softmax":
+                    # numpy.sqrt(1/(2*numpy.pi)) is the weird number
+                    phi_t = 0.3989422917366028 * tensor.sum(
+                        a_t * tensor.sqrt(b_t) *
+                        tensor.exp(-0.5 * b_t * (k_t_ - u)**2), axis=1)
+                else:
+                    phi_t = tensor.sum(
+                        a_t * tensor.exp(-b_t * (k_t_ - u)**2), axis=1)
+
+                # batch size X len context X num letters
+                w_t = (tensor.shape_padright(phi_t) * context_oh).sum(axis=1)
+
+                attinp_h2, attgat_h2 = self.inp_to_h2.apply(w_t)
+                attinp_h3, attgat_h3 = self.inp_to_h3.apply(w_t)
+                inp_h2_t += attinp_h2
+                gat_h2_t += attgat_h2
+                inp_h3_t += attinp_h3
+                gat_h3_t += attgat_h3
+            else:
+                k_t = k_tm1
+                w_t = w_tm1
+                a_t_ = k_tm1
+                phi_t = k_tm1
+
+            h1inp_h2, h1gat_h2 = self.h1_to_h2.apply(h1_t)
+            h1inp_h3, h1gat_h3 = self.h1_to_h3.apply(h1_t)
+
+            to_normalize = [
+                h1inp_h2, h1gat_h2, h1inp_h3, h1gat_h3]
+            h1inp_h2, h1gat_h2, h1inp_h3, h1gat_h3 = \
+                [_apply_norm(x, self.layer_norm) for x in to_normalize]
+
+            h2_t = self.rnn2.apply(
+                inp_h2_t + h1inp_h2,
+                gat_h2_t + h1gat_h2,
+                h2_tm1, iterate=False)
+
+            h2inp_h3, h2gat_h3 = self.h2_to_h3.apply(h2_t)
+
+            to_normalize = [
+                h2inp_h3, h2gat_h3]
+            h2inp_h3, h2gat_h3 = \
+                [_apply_norm(x, self.layer_norm) for x in to_normalize]
+
+            h3_t = self.rnn3.apply(
+                inp_h3_t + h1inp_h3 + h2inp_h3,
+                gat_h3_t + h1gat_h3 + h2gat_h3,
+                h3_tm1, iterate=False)
+
+            if self.residual_across_time:
+                h3_t = 0.5*h3_t + 0.5*h3_tm1
+                h2_t = 0.5*h2_t + 0.5*h2_tm1
+                h1_t = 0.5*h1_t + 0.5*h1_tm1
+
+            h1_out = self.h1_to_readout.apply(h1_t)
+            h2_out = self.h2_to_readout.apply(h2_t)
+            h3_out = self.h3_to_readout.apply(h3_t)
+
+            to_normalize = [
+                h1_out, h2_out, h3_out]
+            h1_out, h2_out, h3_out = \
+                [_apply_norm(x, self.layer_norm) for x in to_normalize]
+
+            readouts = h1_out + h2_out + h3_out + readout_sum
+
+
+            if self.labels_type == 'unaligned':
+                readouts += self.att_to_readout.apply(w_t)
+
+            predicted_t = self.readout_to_output.apply(readouts) + output_sum
+
+
+            return predicted_t, h1_t, h2_t, h3_t, k_t, w_t, phi_t, a_t_
+
+        (predicted, h1, h2, h3, k, w, phi, pi_att), scan_updates = theano.scan(
+            fn=step,
+            sequences=[cell_h1, gat_h1, cell_h2, gat_h2, cell_h3, gat_h3, use_sampled, input_features],
+            non_sequences=[context_oh, readout_sum, output_sum],
+            outputs_info=[
+                initial_x,
+                input_h1,
+                input_h2,
+                input_h3,
+                input_k,
+                input_w,
+                None,
+                None])
+
+
+        if self.use_latent:
+            if self.use_mutual_info:
+                mu_pred, log_sigma_pred = self.latent_encoder.apply(predicted, mask)
+                mutual_info = 0.5*(2*log_sig - 2*log_sigma_pred + (tensor.exp(2*log_sigma_pred) +\
+                                 (mu_pred - mu)**2)*(tensor.exp(-2*log_sig) + 0.00001))
+
+                mutual_info = mutual_info.sum(axis=1).mean()
+
+        if self.only_compute_delta_norm:
+            predicted *= 0.
+
+        if self.only_residual_train:
+            predicted += input_features
+
+        cost = tensor.sum((predicted - target_features) ** 2, axis=-1)
+
+        next_x = predicted
+        # Dummy value for coeff
+        coeff = predicted
+
+        cost = (cost * mask).sum() / (mask.sum() + 1e-5) + 0. * start_flag
+        # cost = cost.mean()
+
+        if self.use_latent:
+            # kl_coeff = iters/(iters + 5e5)
+            kl_cost = kl_cost/(mask.sum() + 1e-5)
+            # cost += kl_coeff*kl_cost
+            cost += kl_cost
+
+            if self.use_mutual_info:
+                cost += mutual_info/(mask.sum() + 1e-5)
+
+
+        updates = []
+        updates.append((last_h1, h1[-1]))
+        updates.append((last_h2, h2[-1]))
+        updates.append((last_h3, h3[-1]))
+
+        updates.append((iters, iters + 1.))
+
+        if self.labels_type == 'unaligned':
+            updates.append((last_k, k[-1]))
+            updates.append((last_w, w[-1]))
+
+
+        attention_vars = [next_x, k, w, coeff, phi, pi_att]
+
+        return cost, scan_updates + updates, attention_vars, kl_cost, mutual_info
+
+    @application
+    def schedule_cost_2(
+            self, features, features_mask, labels, labels_mask,
+            speaker, start_flag, batch_size, is_train=True):
+
+        initial_h1, last_h1, initial_h2, last_h2, initial_h3, last_h3, \
+            initial_w, last_w, initial_k, last_k = \
+            self.initial_states(batch_size)
+
+        assert(self.which_cost == "MSE")
+        assert(not self.quantized_input)
+
+        if speaker is None:
+            assert not self.use_speaker
+
+        if labels is None:
+            assert self.labels_type == 'unconditional'
+
+        iters = shared_floatx(self.initial_iters)
+
+        kl_cost = None
+
+        target_features = features[1:]
+        input_features = features[:-1]
+        mask = features_mask[1:]
+
+
+        sampled_prob = 1 - self.zero_out_prob/(1. + 1e-5*iters)
+        use_sampled = tensor.cast(self.theano_rng.binomial(size=(mask.shape[0], batch_size), n=1, p=sampled_prob), floatX)
+
+
+        if self.quantized_input:
+            initial_x = numpy.zeros(
+                (batch_size, self.output_dim), dtype=numpy.int64) + (self.levels - 1)//2
+        else:
+            initial_x = numpy.zeros(
+                (batch_size, self.output_dim), dtype=floatX)
+
+        cell_shape = (mask.shape[0], batch_size, self.rnn_h_dim)
+        gat_shape = (mask.shape[0], batch_size, 2 * self.rnn_h_dim)
+        cell_h1 = tensor.zeros(cell_shape, dtype=floatX)
+        cell_h2 = tensor.zeros(cell_shape, dtype=floatX)
+        cell_h3 = tensor.zeros(cell_shape, dtype=floatX)
+        gat_h1 = tensor.zeros(gat_shape, dtype=floatX)
+        gat_h2 = tensor.zeros(gat_shape, dtype=floatX)
+        gat_h3 = tensor.zeros(gat_shape, dtype=floatX)
+
+        if self.labels_type not in ['unconditional', 'unaligned']:
+            if self.labels_type == 'phonemes':
+                labels = self.embed_label.apply(labels)
+
+            inp_cell_h1, inp_gat_h1 = self.inp_to_h1.apply(labels)
+            inp_cell_h2, inp_gat_h2 = self.inp_to_h2.apply(labels)
+            inp_cell_h3, inp_gat_h3 = self.inp_to_h3.apply(labels)
+
+            to_normalize = [
+                inp_cell_h1, inp_gat_h1, inp_cell_h2, inp_gat_h2,
+                inp_cell_h3, inp_gat_h3]
+
+            inp_cell_h1, inp_gat_h1, inp_cell_h2, inp_gat_h2, \
+                inp_cell_h3, inp_gat_h3 = \
+                [_apply_norm(x, self.layer_norm) for x in to_normalize]
+
+            cell_h1 += inp_cell_h1
+            cell_h2 += inp_cell_h2
+            cell_h3 += inp_cell_h3
+            gat_h1 += inp_gat_h1
+            gat_h2 += inp_gat_h2
+            gat_h3 += inp_gat_h3
+
+        if self.use_speaker:
+            speaker = speaker[:, 0]
+            emb_speaker = self.embed_speaker.apply(speaker)
+
+            # Applied before the broadcast.
+            spk_readout = self.speaker_to_readout.apply(emb_speaker)
+            spk_output = self.speaker_to_output.apply(emb_speaker)
+
+            # Add dimension to repeat with time.
+            # emb_speaker = tensor.shape_padleft(emb_speaker)
+
+            spk_cell_h1, spk_gat_h1 = self.speaker_to_h1.apply(emb_speaker)
+            spk_cell_h2, spk_gat_h2 = self.speaker_to_h2.apply(emb_speaker)
+            spk_cell_h3, spk_gat_h3 = self.speaker_to_h3.apply(emb_speaker)
+
+            to_normalize = [
+                spk_cell_h1, spk_gat_h1, spk_cell_h2, spk_gat_h2,
+                spk_cell_h3, spk_gat_h3]
+
+            spk_cell_h1, spk_gat_h1, spk_cell_h2, spk_gat_h2, \
+                spk_cell_h3, spk_gat_h3, = \
+                [_apply_norm(x, self.layer_norm) for x in to_normalize]
+
+            cell_h1 += spk_cell_h1
+            cell_h2 += spk_cell_h2
+            cell_h3 += spk_cell_h3
+            gat_h1 += spk_gat_h1
+            gat_h2 += spk_gat_h2
+            gat_h3 += spk_gat_h3
+
+        if self.use_latent:
+            mu, log_sig = self.latent_encoder.apply(features, features_mask)
+            e = tensor.cast(self.theano_rng.normal(mu.shape), floatX)
+
+            latent_var = mu + e*(tensor.exp(log_sig) + self.epsilon)
+
+            kl_cost = kl_unit_gaussian(mu, log_sig).sum(axis=1)
+
+            kl_cost = kl_cost.mean()
+
+            # latent_var = tensor.shape_padleft(latent_var)
+
+            latent_readout = self.latent_to_readout.apply(latent_var)
+            latent_output = self.latent_to_output.apply(latent_var)
+
+            # latent_var = tensor.shape_padleft(latent_var)
+
+            latent_cell_h1, latent_gat_h1, latent_cell_h2, \
+                latent_gat_h2, latent_cell_h3, latent_gat_h3 = self.latent_to_h.apply(latent_var)
+
+            # to_normalize = [
+            #     latent_cell_h1, latent_gat_h1, latent_cell_h2,
+            #     latent_gat_h2, latent_cell_h3, latent_gat_h3 ]
+
+            # latent_cell_h1, latent_gat_h1, latent_cell_h2, \
+            #     latent_gat_h2, latent_cell_h3, latent_gat_h3 = \
+            #     [_apply_norm(x, self.layer_norm) for x in to_normalize]
+
+            cell_h1 = latent_cell_h1 + cell_h1
+            cell_h2 = latent_cell_h2 + cell_h2
+            cell_h3 = latent_cell_h3 + cell_h3
+            gat_h1 = latent_gat_h1 + gat_h1
+            gat_h2 = latent_gat_h2 + gat_h2
+            gat_h3 = latent_gat_h3 + gat_h3
+
+
+
+        if self.labels_type == 'unaligned':
+            # TODO: include context_oh as context in the step function.
+            # batch_size * seq_length * num_characters
+
+            if self.encoder_type is None:
+                context_oh = one_hot(labels, self.num_characters) * \
+                    tensor.shape_padright(labels_mask)
+            elif self.encoder_type == 'bidirectional':
+                context_oh = self.encoder.apply(labels) * \
+                    tensor.shape_padright(labels_mask)
+
+            u = tensor.shape_padleft(
+                tensor.arange(labels.shape[1], dtype=floatX), 2)
+
+        input_h1 = tensor.switch(
+            start_flag, initial_h1, last_h1)
+        input_h2 = tensor.switch(
+            start_flag, initial_h2, last_h2)
+        input_h3 = tensor.switch(
+            start_flag, initial_h3, last_h3)
+        input_w = tensor.switch(
+            start_flag, initial_w, last_w)
+        input_k = tensor.switch(
+            start_flag, initial_k, last_k)
+
+        def sample_step(
+                inp_cell_h1_t, inp_gat_h1_t, inp_cell_h2_t, inp_gat_h2_t,
+                inp_cell_h3_t, inp_gat_h3_t, use_sampled_t, inp_tm1, x_tm1, h1_tm1, h2_tm1, h3_tm1,
+                k_tm1, w_tm1, context_oh, latent_readout):
+
+            cell_h1_t = inp_cell_h1_t
+            cell_h2_t = inp_cell_h2_t
+            cell_h3_t = inp_cell_h3_t
+
+            gat_h1_t = inp_gat_h1_t
+            gat_h2_t = inp_gat_h2_t
+            gat_h3_t = inp_gat_h3_t
+
+            # x_tm1 = x_tm1*use_sampled_t[:, None] + inp_tm1*(1 - use_sampled_t)[:,None]
+
+            if self.only_noise:
+                x_tm1 = tensor.zeros_like(x_tm1)
+
+            if self.quantized_input:
+                x_tm1 = self.output_embed.apply(x_tm1)
+                x_tm1 = x_tm1.reshape((x_tm1.shape[0], self.output_embed_dim*self.output_dim))
+                x_tm1 = self.embed_to_usual.apply(x_tm1)
+
+            if self.labels_type == 'unaligned':
+                attinp_h1, attgat_h1 = self.inp_to_h1.apply(w_tm1)
+                cell_h1_t += attinp_h1
+                gat_h1_t += attgat_h1
+
+            if self.weak_feedback:
+                out_cell_h1_t, out_gat_h1_t = self.out_to_h1.apply(x_tm1)
+
+                to_normalize = [
+                    out_cell_h1_t, out_gat_h1_t]
+                out_cell_h1_t, out_gat_h1_t = \
+                    [_apply_norm(x, self.layer_norm) for x in to_normalize]
+
+                cell_h1_t += out_cell_h1_t
+                gat_h1_t += out_gat_h1_t
+
+            if self.full_feedback:
+                out_cell_h2_t, out_gat_h2_t = self.out_to_h2.apply(x_tm1)
+                out_cell_h3_t, out_gat_h3_t = self.out_to_h3.apply(x_tm1)
+
+                to_normalize = [
+                    out_cell_h2_t, out_gat_h2_t,
+                    out_cell_h3_t, out_gat_h3_t]
+                out_cell_h2_t, out_gat_h2_t, \
+                    out_cell_h3_t, out_gat_h3_t = \
+                    [_apply_norm(x, self.layer_norm) for x in to_normalize]
+
+                cell_h2_t += out_cell_h2_t
+                cell_h3_t += out_cell_h3_t
+                gat_h2_t += out_gat_h2_t
+                gat_h3_t += out_gat_h3_t
+
+            if self.very_weak_feedback:
+                out_cell_h3_t, out_gat_h3_t = self.out_to_h3_feedback.apply(x_tm1)
+                to_normalize = [out_cell_h3_t, out_gat_h3_t]
+                out_cell_h3_t, out_gat_h3_t = \
+                    [_apply_norm(x, self.layer_norm) for x in to_normalize]
+                cell_h3_t += out_cell_h3_t
+                gat_h3_t += out_gat_h3_t
+
+            h1_t = self.rnn1.apply(
+                cell_h1_t,
+                gat_h1_t,
+                h1_tm1, iterate=False)
+
+            if self.labels_type == 'unaligned':
+                a_t, b_t, k_t = self.h1_to_att.apply(h1_t)
+
+                if self.attention_type == "softmax":
+                    a_t = tensor.nnet.softmax(a_t) + self.epsilon
+                else:
+                    a_t = tensor.exp(a_t) + self.epsilon
+
+                b_t = tensor.exp(b_t) + self.epsilon
+                k_t = k_tm1 + self.attention_alignment * tensor.exp(k_t)
+
+                a_t_ = a_t
+                a_t = tensor.shape_padright(a_t)
+                b_t = tensor.shape_padright(b_t)
+                k_t_ = tensor.shape_padright(k_t)
+
+
+                # batch size X att size X len context
+                if self.attention_type == "softmax":
+                    # numpy.sqrt(1/(2*numpy.pi)) is the weird number
+                    phi_t = 0.3989422917366028 * tensor.sum(
+                        a_t * tensor.sqrt(b_t) *
+                        tensor.exp(-0.5 * b_t * (k_t_ - u)**2), axis=1)
+                else:
+                    phi_t = tensor.sum(
+                        a_t * tensor.exp(-b_t * (k_t_ - u)**2), axis=1)
+
+                # batch size X len context X num letters
+                w_t = (tensor.shape_padright(phi_t) * context_oh).sum(axis=1)
+
+                attinp_h2, attgat_h2 = self.inp_to_h2.apply(w_t)
+                attinp_h3, attgat_h3 = self.inp_to_h3.apply(w_t)
+                cell_h2_t += attinp_h2
+                gat_h2_t += attgat_h2
+                cell_h3_t += attinp_h3
+                gat_h3_t += attgat_h3
+            else:
+                k_t = k_tm1
+                w_t = w_tm1
+                phi_t = k_tm1
+                a_t_ = k_tm1
+
+            h1inp_h2, h1gat_h2 = self.h1_to_h2.apply(h1_t)
+            h1inp_h3, h1gat_h3 = self.h1_to_h3.apply(h1_t)
+
+            to_normalize = [
+                h1inp_h2, h1gat_h2, h1inp_h3, h1gat_h3]
+            h1inp_h2, h1gat_h2, h1inp_h3, h1gat_h3 = \
+                [_apply_norm(x, self.layer_norm) for x in to_normalize]
+
+            h2_t = self.rnn2.apply(
+                cell_h2_t + h1inp_h2,
+                gat_h2_t + h1gat_h2,
+                h2_tm1, iterate=False)
+
+            h2inp_h3, h2gat_h3 = self.h2_to_h3.apply(h2_t)
+
+            to_normalize = [
+                h2inp_h3, h2gat_h3]
+            h2inp_h3, h2gat_h3 = \
+                [_apply_norm(x, self.layer_norm) for x in to_normalize]
+
+            h3_t = self.rnn3.apply(
+                cell_h3_t + h1inp_h3 + h2inp_h3,
+                gat_h3_t + h1gat_h3 + h2gat_h3,
+                h3_tm1, iterate=False)
+
+            h1_out_t = self.h1_to_readout.apply(h1_t)
+            h2_out_t = self.h2_to_readout.apply(h2_t)
+            h3_out_t = self.h3_to_readout.apply(h3_t)
+
+            to_normalize = [
+                h1_out_t, h2_out_t, h3_out_t]
+            h1_out_t, h2_out_t, h3_out_t = \
+                [_apply_norm(x, self.layer_norm) for x in to_normalize]
+
+            readout_t = h1_out_t + h2_out_t + h3_out_t
+
+            if self.labels_type == 'unaligned':
+                readout_t += self.att_to_readout.apply(w_t)
+
+            if self.use_speaker:
+                readout_t += spk_readout
+
+            if self.use_latent:
+                readout_t += latent_readout
+
+            output_t = self.readout_to_output.apply(readout_t)
+
+            if self.which_cost == 'MSE':
+                predicted_x_t = output_t
+                if self.use_speaker:
+                    predicted_x_t += spk_output
+
+                if self.use_latent:
+                    predicted_x_t += latent_output
+
+                if self.only_compute_delta_norm:
+                    predicted_x_t *= 0.
+                
+                if self.only_residual_train:
+                    predicted_x_t += x_tm1
+
+                # Dummy value for coeff_t
+                coeff_t = predicted_x_t
+            # elif self.which_cost == "GMM":
+            #     mu_t, sigma_t, coeff_t = output_t
+            #     if self.use_speaker:
+            #         mu_t += spk_output[0]
+            #         sigma_t += spk_output[1]
+            #         coeff_t += spk_output[2]
+
+            #     if self.use_latent:
+            #         mu_t += latent_output[0]
+            #         sigma_t += latent_output[1]
+            #         coeff_t += latent_output[2]
+
+            #     if self.only_residual_train:
+            #         mu_t += x_tm1
+
+            #     sigma_t = tensor.exp(sigma_t - self.sampling_bias) + \
+            #         self.epsilon
+
+            #     coeff_t = tensor.nnet.softmax(
+            #         coeff_t.reshape(
+            #             (-1, self.k_gmm)) * (1. + self.sampling_bias)).reshape(
+            #                 coeff_t.shape) + self.epsilon
+
+            #     predicted_x_t = sample_gmm(
+            #         mu_t, sigma_t, coeff_t, self.theano_rng)
+            # elif self.which_cost == "CCE":
+            #     predicted_x_t = output_t
+            #     if self.use_speaker:
+            #         predicted_x_t += spk_output
+
+            #     if self.use_latent:
+            #         predicted_x_t += latent_output
+
+            #     assert (not self.only_compute_delta_norm)
+                
+                
+            #     assert (not self.only_residual_train)
+
+            #     # Dummy value for coeff_t
+            #     coeff_t = output_t
+
+            #     predicted_x_t = sample_softmax(predicted_x_t, self.levels)
+
+            # if self.residual_across_time:
+            #     h3_t = 0.5*h3_t + 0.5*h3_tm1
+            #     h2_t = 0.5*h2_t + 0.5*h2_tm1
+            #     h1_t = 0.5*h1_t + 0.5*h1_tm1
+                
+
+            return predicted_x_t, h1_t, h2_t, h3_t, \
+                k_t, w_t, phi_t, a_t_
+
+        (sample_x, h1, h2, h3, k, w, phi, pi_att), scan_updates = theano.scan(
+            fn=sample_step,
+            sequences=[
+                cell_h1,
+                gat_h1,
+                cell_h2,
+                gat_h2,
+                cell_h3,
+                gat_h3,
+                use_sampled,
+                input_features],
+            non_sequences=[context_oh, latent_readout],
+            outputs_info=[
+                initial_x,
+                initial_h1,
+                initial_h2,
+                initial_h3,
+                initial_k,
+                initial_w,
+                None,
+                None,
+                ])
+
+        cost = tensor.sum((sample_x - target_features) ** 2, axis=-1)
+        cost = (cost * mask).sum() / (mask.sum() + 1e-5) + 0. * start_flag
+        # cost = cost.mean()
+
+        # if self.use_latent:
+        #     # kl_coeff = iters/(iters + 5e5)
+        #     kl_cost = kl_cost/(mask.sum() + 1e-5)
+        #     # cost += kl_coeff*kl_cost
+        #     cost += kl_cost
+
+        updates = []
+        # updates.append((last_h1, h1[-1]))
+        # updates.append((last_h2, h2[-1]))
+        # updates.append((last_h3, h3[-1]))
+
+        updates.append((iters, iters + 1.))
+
+        # if self.labels_type == 'unaligned':
+        #     updates.append((last_k, k[-1]))
+        #     updates.append((last_w, w[-1]))
+
+        coeff = sample_x
+
+        attention_vars = [sample_x, k, w, coeff, phi, pi_att]
+
+        return cost, scan_updates + updates, attention_vars, kl_cost, None
+
