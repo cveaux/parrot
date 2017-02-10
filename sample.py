@@ -168,10 +168,14 @@ parrot_args = {
 
 parrot = Parrot(**parrot_args)
 
-LATENT_NUM = 5
-LATENT_DIM = parrot.latent_dim
+if saved_args.use_latent:
+    LATENT_NUM = 5
+    LATENT_DIM = parrot.latent_dim
+else:
+    LATENT_NUM = 1
+    LATENT_DIM = parrot.latent_dim
 
-features, features_mask, labels, labels_mask, speaker, latent_var, start_flag = \
+features, features_mask, labels, labels_mask, speaker, latent_var, start_flag, raw_audio = \
     parrot.symbolic_input_variables()
 
 cost, extra_updates, attention_vars, kl_cost, mutual_info = parrot.compute_cost(

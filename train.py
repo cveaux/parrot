@@ -60,29 +60,6 @@ print "Finished saving."
 w_init = initialization.IsotropicGaussian(0.01)
 b_init = initialization.Constant(0.)
 
-train_stream = parrot_stream(
-    args.dataset, args.use_speaker, ('train',), args.batch_size,
-    noise_level=args.feedback_noise_level, labels_type=args.labels_type,
-    seq_size=args.seq_size, quantize_features=args.quantized_input)
-
-if args.feedback_noise_level is None:
-    val_noise_level = None
-else:
-    val_noise_level = 0.
-
-valid_stream = parrot_stream(
-    args.dataset, args.use_speaker, ('valid',), args.batch_size,
-    noise_level=val_noise_level, labels_type=args.labels_type,
-    seq_size=10000, quantize_features=args.quantized_input)
-
-example_batch = next(valid_stream.get_epoch_iterator())
-
-for idx, source in enumerate(train_stream.sources):
-    if source not in ['start_flag', 'feedback_noise_level']:
-        print source, "shape: ", example_batch[idx].shape, \
-            source, "dtype: ", example_batch[idx].dtype
-    else:
-        print source, ": ", example_batch[idx]
 
 parrot_args = {
     'input_dim': args.input_dim,
@@ -122,7 +99,8 @@ parrot_args = {
 parrot = Parrot(**parrot_args)
 parrot.initialize()
 
-features, features_mask, labels, labels_mask, speaker, latent_var, start_flag = \
+
+features, features_mask, labels, labels_mask, speaker, latent_var, start_flag, raw_audio = \
     parrot.symbolic_input_variables()
 
 
@@ -133,7 +111,7 @@ else:
 
 cost, extra_updates, attention_vars, kl_cost, mutual_info = compute_cost(
     features, features_mask, labels, labels_mask,
-    speaker, start_flag, args.batch_size, is_train=True)
+    speaker, start_flag, args.batch_size, raw_audio=raw_audio, is_train=True)
 
 cost_name = 'nll'
 cost.name = cost_name
@@ -194,6 +172,33 @@ if args.lr_schedule:
     lr = algorithm.step_rule.components[1].learning_rate
     monitoring_vars.append(lr)
     plot_names += [['valid_learning_rate']]
+
+
+
+
+train_stream = parrot_stream(
+    args.dataset, args.use_speaker, ('train',), args.batch_size,
+    noise_level=args.feedback_noise_level, labels_type=args.labels_type,
+    seq_size=args.seq_size, quantize_features=args.quantized_input, raw_audio=parrot.raw_output)
+
+if args.feedback_noise_level is None:
+    val_noise_level = None
+else:
+    val_noise_level = 0.
+
+valid_stream = parrot_stream(
+    args.dataset, args.use_speaker, ('valid',), args.batch_size,
+    noise_level=val_noise_level, labels_type=args.labels_type,
+    seq_size=10000, quantize_features=args.quantized_input, raw_audio=parrot.raw_output)
+
+example_batch = next(valid_stream.get_epoch_iterator())
+
+for idx, source in enumerate(train_stream.sources):
+    if source not in ['start_flag', 'feedback_noise_level']:
+        print source, "shape: ", example_batch[idx].shape, \
+            source, "dtype: ", example_batch[idx].dtype
+    else:
+        print source, ": ", example_batch[idx]
 
 train_monitor = TrainingDataMonitoring(
     variables=monitoring_vars,

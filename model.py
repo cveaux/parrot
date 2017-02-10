@@ -6,13 +6,20 @@ from blocks.bricks.parallel import Fork
 from blocks.bricks.recurrent import GatedRecurrent, Bidirectional
 from blocks.roles import add_role, INITIAL_STATE
 from blocks.utils import shared_floatx_zeros, dict_union, shared_floatx
-from blocks.initialization import IsotropicGaussian, Uniform
+from blocks.initialization import IsotropicGaussian, Uniform, Constant
+
+from blocks.bricks import Brick
 
 import numpy
 
 import theano
 # theano.config.compute_test_value = 'warn'
 from theano import tensor, function
+
+import sys
+sys.path.insert(1, '.')
+sys.path.insert(1, '/u/kumarkun/sampleRNN_TTS/')
+from models.conditional import three_tier
 
 floatX = theano.config.floatX
 
@@ -224,6 +231,32 @@ class Encoder(Initializable):
 
         return encoded_x
 
+class SampleRnn(Brick):
+    def __init__(self, **kwargs):
+        super(SampleRnn, self).__init__(**kwargs)
+        self.params = []
+        self.N_RNN = three_tier.N_RNN
+
+
+    @application
+    def compute_cost(self, sequences, features, h0, big_h0, reset, mask):
+        cost, ip_cost, all_params, ip_params, other_params, new_h0, new_big_h0 = \
+            three_tier.compute_cost(sequences, features, h0, big_h0, reset, mask)
+
+        self.params = all_params
+
+        return cost, ip_cost, all_params, ip_params, other_params, new_h0, new_big_h0
+
+    def initial_states(self, batch_size):
+        big_h0_shape = (batch_size, three_tier.N_RNN, three_tier.H0_MULT*three_tier.BIG_DIM)
+        last_big_h0 = shared_floatx_zeros(big_h0_shape)
+
+        h0_shape = (batch_size, three_tier.N_RNN, three_tier.H0_MULT*three_tier.DIM)
+        last_h0 = shared_floatx_zeros(h0_shape)
+
+        return last_h0, last_big_h0
+
+
 class LatentEncoder(Initializable):
     def __init__(
             self,
@@ -269,7 +302,8 @@ class LatentEncoder(Initializable):
                             input_dim=rnn_h_dim,
                             output_dims=[latent_dim, latent_dim],
                             name='rnn_{}_to_mu_logsig'.format(num_layers),
-                            biases_init=Uniform(width=1.)
+                            biases_init=Constant(2.),
+                            weights_init=IsotropicGaussian(std=3.)
                         )
 
         self.children.append(mu_sig_fork)
@@ -299,7 +333,7 @@ class LatentEncoder(Initializable):
 
         raw_stats = next_x.sum(axis=0)/(x_mask.sum(axis=0)[:, None] + 1e-5)
 
-        latent_mu, latent_log_sigma = self.linear_transforms[self.num_layers].apply(raw_stats)
+        latent_mu, latent_log_sigma = self.linear_transforms[-1].apply(raw_stats)
 
         return latent_mu, latent_log_sigma
 
@@ -348,6 +382,7 @@ class Parrot(Initializable, Random):
             zero_out_more_initially=False,
             fixed_zero_out_prob=False,
             use_scheduled_sampling=False,
+            raw_output=False,
             **kwargs):
 
         super(Parrot, self).__init__(**kwargs)
@@ -399,6 +434,7 @@ class Parrot(Initializable, Random):
         self.use_scheduled_sampling = use_scheduled_sampling
 
         self.levels = levels
+        self.raw_output = raw_output
 
         if self.very_weak_feedback:
             self.weak_feedback = False
@@ -702,6 +738,12 @@ class Parrot(Initializable, Random):
             self.children += [
                 self.out_to_h3_feedback]
 
+
+        if self.raw_output:
+            self.sampleRnn = SampleRnn()
+            self.children += [self.sampleRnn]
+
+
     def _allocate(self):
         self.initial_w = shared_floatx_zeros(
             (self.encoded_input_dim,), name="initial_w")
@@ -741,8 +783,13 @@ class Parrot(Initializable, Random):
         else:
             latent_var = None
 
+        if self.raw_output:
+            raw_sequence = tensor.imatrix('raw_audio')
+        else:
+            raw_sequence = None
+
         return features, features_mask, labels, labels_mask, \
-            speaker, latent_var, start_flag
+            speaker, latent_var, start_flag, raw_sequence
 
     def initial_states(self, batch_size):
         initial_h1 = self.rnn1.initial_states(batch_size)
@@ -773,11 +820,11 @@ class Parrot(Initializable, Random):
     @application
     def compute_cost(
             self, features, features_mask, labels, labels_mask,
-            speaker, start_flag, batch_size, is_train=True):
+            speaker, start_flag, batch_size, raw_audio=None, is_train=True):
 
         if self.use_scheduled_sampling:
             return self.schedule_cost(features, features_mask, labels, labels_mask,
-            speaker, start_flag, batch_size, is_train)
+            speaker, start_flag, batch_size, raw_audio=None, is_train=is_train)
 
         if speaker is None:
             assert not self.use_speaker
@@ -1199,6 +1246,24 @@ class Parrot(Initializable, Random):
             updates.append((last_k, k[-1]))
             updates.append((last_w, w[-1]))
 
+        if self.raw_output:
+            raw_mask = tensor.extra_ops.repeat(mask, 80, axis=1)
+            raw_mask = raw_mask.dimshuffle(1, 0)
+
+            last_h0, last_big_h0 = self.sampleRnn.initial_states(batch_size)
+
+            cost_raw, ip_cost, all_params, ip_params, other_params, new_h0, new_big_h0 =\
+                self.sampleRnn.compute_cost(raw_audio, predicted, last_h0, last_big_h0, start_flag, raw_mask)
+
+            if self.sampleRnn.N_RNN == 1:
+                new_h0 = tensor.unbroadcast(new_h0, 1)
+                new_big_h0 = tensor.unbroadcast(new_big_h0, 1)
+
+
+            updates.append((last_h0, new_h0))
+            updates.append((last_big_h0, new_big_h0))
+            cost += cost_raw
+
 
         attention_vars = [next_x, k, w, coeff, phi, pi_att]
 
@@ -1572,7 +1637,7 @@ class Parrot(Initializable, Random):
             self, labels_tr, labels_mask_tr, features_mask_tr, 
             speaker_tr, latent_var_tr, num_samples):
 
-        features, features_mask, labels, labels_mask, speaker, latent_var, start_flag = \
+        features, features_mask, labels, labels_mask, speaker, latent_var, start_flag, raw_sequence = \
             self.symbolic_input_variables()
 
         sample_x, k, w, pi, phi, pi_att, updates = \
@@ -1607,7 +1672,7 @@ class Parrot(Initializable, Random):
     def sample_using_input(self, data_tr, num_samples):
         # Used to predict the values using the dataset
 
-        features, features_mask, labels, labels_mask, speaker, latent_var, start_flag = \
+        features, features_mask, labels, labels_mask, speaker, latent_var, start_flag, raw_sequence = \
             self.symbolic_input_variables()
 
         cost, updates, attention_vars, kl_cost, mutual_info = self.compute_cost(
@@ -1635,7 +1700,7 @@ class Parrot(Initializable, Random):
     @application
     def schedule_cost(
             self, features, features_mask, labels, labels_mask,
-            speaker, start_flag, batch_size, is_train=True):
+            speaker, start_flag, batch_size, raw_audio=None, is_train=True):
 
         if speaker is None:
             assert not self.use_speaker
