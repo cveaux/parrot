@@ -11,6 +11,8 @@ from fuel.streams import DataStream
 
 from fuel.datasets import H5PYDataset
 
+from quantize import __batch_quantize
+
 import numpy
 
 
@@ -22,6 +24,10 @@ def _transpose(data):
     return data.swapaxes(0, 1)
 
 
+def _chunk(data, frame_size=80, axis=1):
+    return numpy.stack(numpy.split(data, data.shape[axis]/frame_size, axis))
+
+
 def _check_batch_size(data, batch_size):
     return len(data[0]) == batch_size
 
@@ -31,6 +37,12 @@ def _check_ratio(data, idx1, idx2, min_val, max_val):
     # print (min_val <= ratio and ratio <= max_val)
     return (min_val <= ratio and ratio <= max_val)
 
+def get_raw_transformer(q_type, q_level):
+    def transformer(batch):
+        batch = __batch_quantize(batch, q_level, q_type)
+        return batch
+
+    return transformer
 
 def get_quantizers(limit=5., quantisation='linear', levels=256):
 
@@ -59,7 +71,6 @@ def get_quantizers(limit=5., quantisation='linear', levels=256):
         return numpy.float32(x)
 
     return quantise, dequantise
-
 
 
 class SegmentSequence(Transformer):
@@ -161,6 +172,7 @@ class SegmentSequence(Transformer):
 
         return tuple(segmented_data)
 
+
 class SourceMapping(AgnosticSourcewiseTransformer):
     """Apply a function to a subset of sources.
 
@@ -198,7 +210,8 @@ class AddConstantSource(Mapping):
 class VoiceData(H5PYDataset):
     def __init__(self, voice, which_sets, filename=None, **kwargs):
 
-        assert voice in ['arctic', 'blizzard', 'dimex', 'vctk', 'librispeech']
+        assert voice in [
+            'arctic', 'blizzard', 'dimex', 'librispeech', 'pavoque', 'vctk']
 
         self.voice = voice
 
@@ -216,11 +229,14 @@ class VoiceData(H5PYDataset):
 def parrot_stream(
         voice, use_speaker=False, which_sets=('train',), batch_size=32,
         seq_size=50, num_examples=None, sorting_mult=4, noise_level=None,
-        labels_type='full_labels', quantize_features=False, check_ratio=True, raw_audio=False):
+        labels_type='full_labels', check_ratio=False,
+        quantize_features=False, raw_data=False, q_type='mu-law', q_level=256):
 
     assert labels_type in [
         'full_labels', 'phonemes', 'unconditional',
         'unaligned_phonemes', 'text']
+
+    assert(quantize_features == False) # Quantization of vocoders features will not work. Fix it from prev commit
 
     dataset = VoiceData(voice=voice, which_sets=which_sets)
 
@@ -229,16 +245,12 @@ def parrot_stream(
     if not num_examples:
         num_examples = dataset.num_examples
 
-    # print num_examples
-
     if 'train' in which_sets:
         scheme = ShuffledExampleScheme(num_examples)
     else:
         scheme = SequentialExampleScheme(num_examples)
 
     data_stream = DataStream.default_stream(dataset, iteration_scheme=scheme)
-
-    # print data_stream.sources
 
     if check_ratio and labels_type in ['unaligned_phonemes', 'text']:
         idx = data_stream.sources.index(labels_type)
@@ -250,8 +262,11 @@ def parrot_stream(
     segment_sources = ('features', 'features_mask')
     all_sources = segment_sources
 
-    if raw_audio:
-        all_sources += ('raw_audio', )
+    if raw_data:
+        raw_sources = ('raw_audio', )
+        all_sources += raw_sources
+    else:
+        raw_sources = ()
 
     if labels_type != 'unconditional':
         all_sources += ('labels', )
@@ -285,10 +300,14 @@ def parrot_stream(
     data_stream = SourceMapping(
         data_stream, _transpose, which_sources=segment_sources)
 
-    if quantize_features:
-        quantize, _ = get_quantizers()
+    # The conditional is not necessary, but I'm still adding it for clarity.
+    if raw_data:
         data_stream = SourceMapping(
-            data_stream, quantize, which_sources='features')
+            data_stream, _chunk, which_sources=raw_sources)
+
+        raw_transformer = get_raw_transformer(q_type, q_level)
+        data_stream = SourceMapping(
+            data_stream, raw_transformer, which_sources=raw_sources)
 
     data_stream = SegmentSequence(
         data_stream,
@@ -296,7 +315,7 @@ def parrot_stream(
         share_value=1,
         return_last=False,
         add_flag=True,
-        which_sources=segment_sources)
+        which_sources=segment_sources + raw_sources)
 
     if noise_level is not None:
         data_stream = AddConstantSource(
@@ -304,8 +323,45 @@ def parrot_stream(
 
     return data_stream
 
-
 if __name__ == "__main__":
+    data_stream = parrot_stream(
+        'dimex', labels_type='text', seq_size=10,
+        batch_size=10, sorting_mult=1, check_ratio=False, raw_data=True)
+    print data_stream.sources
+    ep_iter = data_stream.get_epoch_iterator()
+
+    data_tr = next(ep_iter)
+    data_tr_next = next(ep_iter)
+
+    for idx, source in enumerate(data_stream.sources):
+        if source not in ['start_flag', 'feedback_noise_level']:
+            print source, "shape: ", data_tr[idx].shape, \
+                source, "dtype: ", data_tr[idx].dtype, \
+                "max_val", data_tr[idx].max()
+        else:
+            print source, ": ", data_tr[idx]
+
+    print numpy.sum(data_tr[0][-1] - data_tr_next[0][0])
+
+    exit()
+    # print next(data_stream.get_epoch_iterator())[-1]
+    # import ipdb; ipdb.set_trace()
+    # # For Arctic, the ratio is 18 steps of features per letter.
+    # data_tr = next(data_stream.get_epoch_iterator())
+    # ratios = (data_tr[1].sum(0) / data_tr[3].sum(1))
+    # print numpy.percentile(ratios, [0, 10, 25, 50, 75, 90, 99, 100])
+
+    # Arctic
+    # phonemes: array([ 12.84, 14.75, 15.56, 16.82, 18.16, 19.89, 48.8])
+    # text:     array([  8.2, 9.89, 10.39, 11.07, 11.91, 12.81, 24.4])
+
+    # Blizzard
+    # phonemes: array([ 6.26, 14.07, 15.11, 16.26, 17.60, 19.23, 103.33])
+    # text:     array([4.37, 9.8, 10.64, 11.62, 12.59, 13.76, 46. ])
+
+    # VCTK
+    # phonemes: array([  3., 12.39, 13.52, 15.03, 16.8, 18.96, 40.5])
+    # text:     array([  2.04, 8.43, 9.23, 10.28, 11.56, 13.03, 23.15])
     data_stream = parrot_stream('dimex', labels_type='text', seq_size=20,batch_size=5, raw_audio=True)
     print data_stream.sources
     # exit()

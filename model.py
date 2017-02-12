@@ -10,6 +10,8 @@ from blocks.initialization import IsotropicGaussian, Uniform, Constant
 
 from blocks.bricks import Brick
 
+from theano.tests.breakpoint import PdbBreakpoint
+
 import numpy
 
 import theano
@@ -784,7 +786,7 @@ class Parrot(Initializable, Random):
             latent_var = None
 
         if self.raw_output:
-            raw_sequence = tensor.imatrix('raw_audio')
+            raw_sequence = tensor.itensor3('raw_audio')
         else:
             raw_sequence = None
 
@@ -1247,13 +1249,20 @@ class Parrot(Initializable, Random):
             updates.append((last_w, w[-1]))
 
         if self.raw_output:
-            raw_mask = tensor.extra_ops.repeat(mask, 80, axis=1)
+            raw_mask = tensor.extra_ops.repeat(features_mask, 80, axis=0)
             raw_mask = raw_mask.dimshuffle(1, 0)
 
-            last_h0, last_big_h0 = self.sampleRnn.initial_states(batch_size)
+            # breakpointOp = PdbBreakpoint("Raw mask breakpoint")
+            # condition = tensor.gt(raw_mask.shape[0], 0)
+            # raw_mask = breakpointOp(condition, raw_mask)
 
+            predicted_transposed = predicted.dimshuffle(1, 0, 2)
+
+            last_h0, last_big_h0 = self.sampleRnn.initial_states(batch_size)
+            raw_audio_reshaped = raw_audio.dimshuffle(1, 0, 2)
+            raw_audio_reshaped = raw_audio_reshaped.reshape((raw_audio_reshaped.shape[0], -1))
             cost_raw, ip_cost, all_params, ip_params, other_params, new_h0, new_big_h0 =\
-                self.sampleRnn.compute_cost(raw_audio, predicted, last_h0, last_big_h0, start_flag, raw_mask)
+                self.sampleRnn.compute_cost(raw_audio_reshaped, predicted_transposed, last_h0, last_big_h0, start_flag, raw_mask)
 
             if self.sampleRnn.N_RNN == 1:
                 new_h0 = tensor.unbroadcast(new_h0, 1)
@@ -1262,7 +1271,7 @@ class Parrot(Initializable, Random):
 
             updates.append((last_h0, new_h0))
             updates.append((last_big_h0, new_big_h0))
-            cost += cost_raw
+            cost = cost_raw
 
 
         attention_vars = [next_x, k, w, coeff, phi, pi_att]

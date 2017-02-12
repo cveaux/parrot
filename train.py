@@ -94,6 +94,8 @@ parrot_args = {
     'zero_out_prob': args.zero_out_prob,
     'use_scheduled_sampling': args.use_scheduled_sampling,
     'use_latent': args.use_latent,
+    'latent_dim': args.latent_dim,
+    'raw_output': args.raw_output,
     'zero_out_more_initially': args.zero_out_more_initially}
 
 parrot = Parrot(**parrot_args)
@@ -179,7 +181,7 @@ if args.lr_schedule:
 train_stream = parrot_stream(
     args.dataset, args.use_speaker, ('train',), args.batch_size,
     noise_level=args.feedback_noise_level, labels_type=args.labels_type,
-    seq_size=args.seq_size, quantize_features=args.quantized_input, raw_audio=parrot.raw_output)
+    seq_size=args.seq_size, quantize_features=args.quantized_input, raw_data=parrot.raw_output)
 
 if args.feedback_noise_level is None:
     val_noise_level = None
@@ -189,7 +191,7 @@ else:
 valid_stream = parrot_stream(
     args.dataset, args.use_speaker, ('valid',), args.batch_size,
     noise_level=val_noise_level, labels_type=args.labels_type,
-    seq_size=10000, quantize_features=args.quantized_input, raw_audio=parrot.raw_output)
+    seq_size=args.seq_size, quantize_features=args.quantized_input, raw_data=parrot.raw_output)
 
 example_batch = next(valid_stream.get_epoch_iterator())
 

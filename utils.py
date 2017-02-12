@@ -236,6 +236,12 @@ def train_parse():
     parser.add_argument('--use_latent', type=t_or_f,
                         default=True,
                         help="Whether to use latent variables")
+    parser.add_argument('--latent_dim', type=int,
+                        default=64,
+                        help="Whether to use latent variables")
+    parser.add_argument('--raw_output', type=t_or_f,
+                        default=False,
+                        help="Whether to use raw output")
 
 
     args = parser.parse_args()

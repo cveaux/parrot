@@ -46,6 +46,10 @@ if not hasattr(saved_args, 'quantized_input'):
     saved_args.quantized_input = False
 if not hasattr(saved_args, 'use_latent'):
     saved_args.use_latent = True
+if not hasattr(saved_args, 'latent_dim'):
+    saved_args.use_latent = 64
+if not hasattr(saved_args, 'raw_output'):
+    saved_args.raw_output = False
 
 if not os.path.exists(os.path.join(args.save_dir, "samples")):
     os.makedirs(os.path.join(args.save_dir, "samples"))
@@ -163,6 +167,7 @@ parrot_args = {
     'only_residual_train': args.only_residual_train,
     'quantized_input': args.quantized_input,
     'use_latent': saved_args.use_latent,
+    'raw_output': saved_args.raw_output,
     'name': 'parrot'}
 
 
