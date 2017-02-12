@@ -33,6 +33,7 @@ with open(os.path.join(
         args.experiment_name + '.pkl')) as f:
     saved_args = cPickle.load(f)
 
+# print saved_args
 # Set default values for old config files.
 if not hasattr(saved_args, 'weak_feedback'):
     saved_args.weak_feedback = False
@@ -47,7 +48,7 @@ if not hasattr(saved_args, 'quantized_input'):
 if not hasattr(saved_args, 'use_latent'):
     saved_args.use_latent = True
 if not hasattr(saved_args, 'latent_dim'):
-    saved_args.use_latent = 64
+    saved_args.latent_dim = 64
 if not hasattr(saved_args, 'raw_output'):
     saved_args.raw_output = False
 
@@ -167,9 +168,11 @@ parrot_args = {
     'only_residual_train': args.only_residual_train,
     'quantized_input': args.quantized_input,
     'use_latent': saved_args.use_latent,
+    'latent_dim': saved_args.latent_dim,
     'raw_output': saved_args.raw_output,
     'name': 'parrot'}
 
+# print parrot_args
 
 parrot = Parrot(**parrot_args)
 

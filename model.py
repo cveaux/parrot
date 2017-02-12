@@ -236,16 +236,23 @@ class Encoder(Initializable):
 class SampleRnn(Brick):
     def __init__(self, **kwargs):
         super(SampleRnn, self).__init__(**kwargs)
-        self.params = []
+        _, _, self.parameters, _, _, _, _ = three_tier.compute_cost(*self.dummy_inputs())
         self.N_RNN = three_tier.N_RNN
 
+    def dummy_inputs(self):
+        seq = tensor.imatrix('dseq')
+        feat = tensor.tensor3('dfeat')
+        h0_ = tensor.tensor3('dh0')
+        big_h0_ = tensor.tensor3('dbigh0')
+        res_ = tensor.scalar('dscalar')
+        mask_ = tensor.matrix('dmask')
+
+        return seq, feat, h0_, big_h0_, res_, mask_
 
     @application
-    def compute_cost(self, sequences, features, h0, big_h0, reset, mask):
+    def apply(self, sequences, features, h0, big_h0, reset, mask):
         cost, ip_cost, all_params, ip_params, other_params, new_h0, new_big_h0 = \
             three_tier.compute_cost(sequences, features, h0, big_h0, reset, mask)
-
-        self.params = all_params
 
         return cost, ip_cost, all_params, ip_params, other_params, new_h0, new_big_h0
 
@@ -1262,7 +1269,7 @@ class Parrot(Initializable, Random):
             raw_audio_reshaped = raw_audio.dimshuffle(1, 0, 2)
             raw_audio_reshaped = raw_audio_reshaped.reshape((raw_audio_reshaped.shape[0], -1))
             cost_raw, ip_cost, all_params, ip_params, other_params, new_h0, new_big_h0 =\
-                self.sampleRnn.compute_cost(raw_audio_reshaped, predicted_transposed, last_h0, last_big_h0, start_flag, raw_mask)
+                self.sampleRnn.apply(raw_audio_reshaped, predicted_transposed, last_h0, last_big_h0, start_flag, raw_mask)
 
             if self.sampleRnn.N_RNN == 1:
                 new_h0 = tensor.unbroadcast(new_h0, 1)

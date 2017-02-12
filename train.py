@@ -126,6 +126,8 @@ if parrot.use_latent:
 cg = ComputationGraph(cost)
 model = Model(cost)
 
+print model.get_parameter_dict().keys()
+
 gradients = None
 if args.adaptive_noise:
     from graph import apply_adaptive_noise
