@@ -4,7 +4,7 @@ from blocks.bricks.base import lazy, application
 from blocks.bricks.lookup import LookupTable
 from blocks.bricks.parallel import Fork
 from blocks.bricks.recurrent import GatedRecurrent, Bidirectional
-from blocks.roles import add_role, INITIAL_STATE
+from blocks.roles import add_role, INITIAL_STATE, PARAMETER
 from blocks.utils import shared_floatx_zeros, dict_union, shared_floatx
 from blocks.initialization import IsotropicGaussian, Uniform, Constant
 
@@ -20,7 +20,7 @@ from theano import tensor, function
 
 import sys
 sys.path.insert(1, '.')
-sys.path.insert(1, '/u/kumarkun/sampleRNN_TTS/')
+sys.path.insert(1, './sampleRNN')
 from models.conditional import three_tier
 
 floatX = theano.config.floatX
@@ -236,16 +236,18 @@ class Encoder(Initializable):
 class SampleRnn(Brick):
     def __init__(self, **kwargs):
         super(SampleRnn, self).__init__(**kwargs)
-        _, _, self.parameters, _, _, _, _ = three_tier.compute_cost(*self.dummy_inputs())
+        _, _, self.parameters, _, _, _, _ = three_tier.compute_cost(*self.raw_inputs())
+        for p in self.parameters:
+            add_role(p, PARAMETER)
         self.N_RNN = three_tier.N_RNN
 
-    def dummy_inputs(self):
-        seq = tensor.imatrix('dseq')
-        feat = tensor.tensor3('dfeat')
-        h0_ = tensor.tensor3('dh0')
-        big_h0_ = tensor.tensor3('dbigh0')
-        res_ = tensor.scalar('dscalar')
-        mask_ = tensor.matrix('dmask')
+    def raw_inputs(self):
+        seq = tensor.imatrix('rseq')
+        feat = tensor.tensor3('rfeat')
+        h0_ = tensor.tensor3('rh0')
+        big_h0_ = tensor.tensor3('rbigh0')
+        res_ = tensor.scalar('rscalar')
+        mask_ = tensor.matrix('rmask')
 
         return seq, feat, h0_, big_h0_, res_, mask_
 
@@ -264,6 +266,22 @@ class SampleRnn(Brick):
         last_h0 = shared_floatx_zeros(h0_shape)
 
         return last_h0, last_big_h0
+
+    def sample_raw(self, test_feats, test_mask, tag, path_to_save):
+        seq, feat, h0_, big_h0_, res_, mask_ = self.raw_inputs()
+        big_frame_gen, frame_gen, sample_gen = three_tier.getting_generation_functions(
+                                    seq, h0_, big_h0_, res_, feat)
+
+        three_tier.generate_and_save_samples(
+            tag,
+            path_to_save=path_to_save,
+            features=test_feats,
+            features_mask=test_mask,
+            noise_level=0.,
+            big_frame_level_generate_fn=big_frame_gen,
+            frame_level_generate_fn=frame_gen,
+            sample_level_generate_fn=sample_gen,
+            npy_address=None)
 
 
 class LatentEncoder(Initializable):
@@ -1255,6 +1273,7 @@ class Parrot(Initializable, Random):
             updates.append((last_k, k[-1]))
             updates.append((last_w, w[-1]))
 
+        cost_raw = None
         if self.raw_output:
             raw_mask = tensor.extra_ops.repeat(features_mask, 80, axis=0)
             raw_mask = raw_mask.dimshuffle(1, 0)
@@ -1278,12 +1297,12 @@ class Parrot(Initializable, Random):
 
             updates.append((last_h0, new_h0))
             updates.append((last_big_h0, new_big_h0))
-            cost = cost_raw
+            cost += 4.*cost_raw
 
 
         attention_vars = [next_x, k, w, coeff, phi, pi_att]
 
-        return cost, scan_updates + updates, attention_vars, kl_cost, mutual_info
+        return cost, scan_updates + updates, attention_vars, kl_cost, cost_raw
 
     @application
     def sample_model_fun(

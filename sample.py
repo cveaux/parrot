@@ -40,17 +40,17 @@ if not hasattr(saved_args, 'weak_feedback'):
 if not hasattr(saved_args, 'full_feedback'):
     saved_args.full_feedback = False
 if not hasattr(saved_args, 'very_weak_feedback'):
-    saved_args.full_feedback = False
+    saved_args.very_weak_feedback = False
 if not hasattr(saved_args, 'labels_type'):
     saved_args.labels_type = 'full'
 if not hasattr(saved_args, 'quantized_input'):
     saved_args.quantized_input = False
 if not hasattr(saved_args, 'use_latent'):
-    saved_args.use_latent = True
+    saved_args.use_latent = False
 if not hasattr(saved_args, 'latent_dim'):
     saved_args.latent_dim = 64
 if not hasattr(saved_args, 'raw_output'):
-    saved_args.raw_output = False
+    saved_args.raw_output = True
 
 if not os.path.exists(os.path.join(args.save_dir, "samples")):
     os.makedirs(os.path.join(args.save_dir, "samples"))
@@ -188,7 +188,7 @@ features, features_mask, labels, labels_mask, speaker, latent_var, start_flag, r
 
 cost, extra_updates, attention_vars, kl_cost, mutual_info = parrot.compute_cost(
     features, features_mask, labels, labels_mask,
-    speaker, start_flag, args.num_samples)
+    speaker, start_flag, args.num_samples, raw_audio=raw_audio)
 
 model = Model(cost)
 model.set_parameter_values(parameters)
@@ -214,11 +214,24 @@ else:
 
 print "Successfully sampled the parrot."
 
-gen_x = gen_x.swapaxes(0, 1)
-
 if saved_args.quantized_input:
     _, dequantize = get_quantizers()
     gen_x = dequantize(gen_x)
+
+# import ipdb; ipdb.set_trace()
+
+if saved_args.raw_output:
+    print "Sampling and saving raw audio..."
+
+    to_save_path = os.path.join(args.save_dir, 'samples', 'raw')
+    if not os.path.exists(to_save_path):
+        os.makedirs(to_save_path)
+
+    parrot.sampleRnn.sample_raw(gen_x.copy(), None, args.samples_name, to_save_path)
+    print "Successfully sampled raw audio..."
+
+gen_x = gen_x.swapaxes(0, 1)
+# import ipdb; ipdb.set_trace()
 
 if saved_args.labels_type in ['unaligned_phonemes', 'text']:
     from utils import full_plot

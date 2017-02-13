@@ -242,6 +242,9 @@ def train_parse():
     parser.add_argument('--raw_output', type=t_or_f,
                         default=False,
                         help="Whether to use raw output")
+    parser.add_argument('--train_only_sampleRnn', type=t_or_f,
+                        default=False,
+                        help="Whether to use raw output")
 
 
     args = parser.parse_args()
