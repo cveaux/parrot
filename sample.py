@@ -16,8 +16,10 @@ from blocks.model import Model
 from datasets import parrot_stream, get_quantizers
 from model import Parrot
 from utils import (
-    sample_parse, create_animation, numpy_one_hot)
+    sample_parse, create_animation, numpy_one_hot, write_audio_file)
 from generate import generate_wav
+
+from quantize import mu2linear
 
 import theano
 
@@ -102,7 +104,7 @@ else:
     test_stream = parrot_stream(
         args.dataset, saved_args.use_speaker, ('test',), args.num_samples,
         args.num_steps, sorting_mult=1, labels_type=saved_args.labels_type,
-        quantize_features=saved_args.quantized_input)
+        quantize_features=saved_args.quantized_input, raw_data=saved_args.raw_output)
 
     data_tr = next(test_stream.get_epoch_iterator())
     data_tr = {
@@ -115,6 +117,9 @@ else:
     labels_tr = data_tr.get('labels', None)
     labels_mask_tr = data_tr.get('labels_mask', None)
     start_flag_tr = data_tr.get('start_flag', None)
+
+    raw_audio_tr = data_tr.get('raw_audio', None)
+
 
 if args.random_speaker:
     numpy.random.seed(1)
@@ -193,6 +198,15 @@ cost, extra_updates, attention_vars, kl_cost, mutual_info = parrot.compute_cost(
 model = Model(cost)
 model.set_parameter_values(parameters)
 
+
+# if True:
+#     with open(os.path.join(
+#         args.save_dir, "pkl",
+#         params_mode + "bidirectional_text_1" + ".tar"), 'rb') as src:
+#         parameters = load_parameters(src)
+
+# model.set_parameter_values(parameters)
+
 print "Successfully loaded the parameters."
 
 if args.sample_one_step:
@@ -221,9 +235,19 @@ if saved_args.quantized_input:
 # import ipdb; ipdb.set_trace()
 
 if saved_args.raw_output:
+    print "Saving original raw audio"
+
+    to_save_path = os.path.join(args.save_dir, 'samples', 'original_raw')
+    if not os.path.exists(to_save_path):
+        os.makedirs(to_save_path)
+    
+    raw_audio = raw_audio_tr.transpose(1, 0, 2).reshape((raw_audio_tr.shape[1], -1))
+    for i in range(len(raw_audio)):
+        write_audio_file("original_raw_{}.wav".format(i), mu2linear(raw_audio[i][:int(features_mask_tr.sum(axis=0)[i])*80]), to_save_path)
+
     print "Sampling and saving raw audio..."
 
-    to_save_path = os.path.join(args.save_dir, 'samples', 'raw')
+    to_save_path = os.path.join(args.save_dir, 'samples', 'new_raw')
     if not os.path.exists(to_save_path):
         os.makedirs(to_save_path)
 

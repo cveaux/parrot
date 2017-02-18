@@ -26,6 +26,8 @@ from extensions import LearningRateSchedule, Plot, TimedFinish
 from datasets import parrot_stream
 from model import Parrot
 from utils import train_parse
+from blocks.filter import VariableFilter
+from blocks.roles import PARAMETER
 
 args = train_parse()
 
@@ -39,6 +41,8 @@ if args.use_last:
     load_prefix = "last_"
 else:
     load_prefix = "best_"
+
+# filter_only_sampleRnn_params= True
 
 if not os.path.exists(save_dir):
     os.makedirs(save_dir)
@@ -115,6 +119,8 @@ cost, extra_updates, attention_vars, kl_cost, mutual_info = compute_cost(
     features, features_mask, labels, labels_mask,
     speaker, start_flag, args.batch_size, raw_audio=raw_audio, is_train=True)
 
+cost_raw = mutual_info
+
 cost_name = 'nll'
 cost.name = cost_name
 
@@ -123,10 +129,13 @@ if parrot.use_latent:
     if parrot.use_mutual_info:
         mutual_info.name = "mutual_info"
 
+if parrot.raw_output:
+    cost_raw.name ="sampleRNN_cost"   
+
 cg = ComputationGraph(cost)
 model = Model(cost)
 
-print model.get_parameter_dict().keys()
+# print model.get_parameter_dict().keys()
 
 gradients = None
 if args.adaptive_noise:
@@ -145,6 +154,14 @@ if args.adaptive_noise:
     cost.name = cost_name
 
 parameters = cg.parameters
+
+if args.train_only_sampleRnn:
+    var_filter = VariableFilter(roles=[PARAMETER], bricks=[parrot.sampleRnn])
+    parameters = var_filter(parameters)
+
+
+
+# print parameters
 
 if args.algorithm == "adam":
     step_rule = CompositeRule(
@@ -170,6 +187,10 @@ if parrot.use_latent:
     if parrot.use_mutual_info:
         monitoring_vars.append(mutual_info)
         plot_names.append(['train_mutual_info', 'valid_mutual_info'])
+
+if parrot.raw_output:
+    monitoring_vars.append(cost_raw)
+    plot_names.append(['train_sampleRNN_cost', 'valid_sampleRNN_cost'])
 
 
 if args.lr_schedule:

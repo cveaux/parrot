@@ -137,8 +137,8 @@ def get_args(arg_string=sys.argv):
 
     return args, tag
 
-args, tag = get_args("--exp DIMEX3TCond80Mu1RNNNoReLU400Seq10FS --seq_len 800 --big_frame_size 80 --frame_size 10 --emb_size 256 --skip_conn False --dim 1024 --n_rnn 1 --rnn_type GRU --q_levels 256 --q_type mu-law --batch_size 16 --weight_norm True --learn_h0 True  --which_set DIMEX")
-
+# args, tag = get_args("--exp DIMEX3TCond80Mu1RNNNoReLU400Seq10FS --seq_len 800 --big_frame_size 80 --frame_size 10 --emb_size 256 --skip_conn False --dim 1024 --n_rnn 1 --rnn_type GRU --q_levels 256 --q_type mu-law --batch_size 16 --weight_norm True --learn_h0 True  --which_set DIMEX")
+args, tag = get_args("--exp PROCESSED_DIMEX_3T_NO_PRETRAIN --seq_len 4000 --big_frame_size 80 --frame_size 10 --emb_size 256 --skip_conn False --dim 1024 --n_rnn 1 --rnn_type GRU --q_levels 256 --q_type mu-law --batch_size 8 --weight_norm True --learn_h0 True --which_set DIMEX")
 
 SEQ_LEN = args.seq_len # How many samples to include in each truncated BPTT pass
 #print "------------------previous SEQ_LEN:", SEQ_LEN
@@ -549,12 +549,12 @@ def compute_cost(sequences, features, h0, big_h0, reset, mask):
     frame_level_outputs, new_h0 = frame_level_rnn(input_sequences, big_frame_level_outputs, h0, reset)
 
     prev_samples = sequences[:, BIG_FRAME_SIZE-FRAME_SIZE:-1]
-    prev_samples = prev_samples.reshape((1, BATCH_SIZE, 1, -1))
+    prev_samples = prev_samples.reshape((1, sequences.shape[0], 1, -1))
     prev_samples = T.nnet.neighbours.images2neibs(prev_samples, (1, FRAME_SIZE), neib_step=(1, 1), mode='valid')
-    prev_samples = prev_samples.reshape((BATCH_SIZE * SEQ_LEN, FRAME_SIZE))
+    prev_samples = prev_samples.reshape((-1, FRAME_SIZE))
 
     sample_level_outputs = sample_level_predictor(
-        frame_level_outputs.reshape((BATCH_SIZE * SEQ_LEN, DIM)),
+        frame_level_outputs.reshape((-1, DIM)),
         prev_samples
     )
 
@@ -614,6 +614,16 @@ def compute_cost(sequences, features, h0, big_h0, reset, mask):
     # assert(os.path.exists('/Tmp/kumarkun/sampleRNN_cond/cond_tts_params.pkl'))
     # lib.load_params("/Tmp/kumarkun/sampleRNN_cond/cond_tts_params.pkl")
     # print "Loaded trained sampleRNN params ...."
+
+    # assert(os.path.exists('/Tmp/kumarkun/sampleRNN_cond/cond_tts_pre_trained_world.pkl'))
+    # lib.load_params("/Tmp/kumarkun/sampleRNN_cond/cond_tts_pre_trained_world.pkl")
+    # print "Loaded trained sampleRNN params ...."
+
+    assert(os.path.exists('/Tmp/kumarkun/sampleRNN_cond/cond_tts_from_scratch_best_latest_params.pkl'))
+    lib.load_params("/Tmp/kumarkun/sampleRNN_cond/cond_tts_from_scratch_best_latest_params.pkl")
+    print "Loaded trained sampleRNN params ...."
+
+
 
     return cost, ip_cost, all_params, ip_params, other_params, new_h0, new_big_h0
 
@@ -718,6 +728,17 @@ def getting_generation_functions(sequences, h0, big_h0, reset, features):
 
 # # Sampling at audio sample level
 
+def write_audio_file(name, data, path_to_save):
+    data = data.astype('float32')
+    data -= data.min()
+    data /= data.max()
+    data -= 0.5
+    data *= 0.95
+    scipy.io.wavfile.write(
+                os.path.join(path_to_save, name+'.wav'),
+                BITRATE,
+                data)
+
 def generate_and_save_samples(
         tag,
         path_to_save=None,
@@ -728,7 +749,7 @@ def generate_and_save_samples(
         frame_level_generate_fn=None,
         sample_level_generate_fn=None,
         npy_address=None):
-    def write_audio_file(name, data):
+    def write_audio_file(name, data, path_to_save=path_to_save):
         data = data.astype('float32')
         data -= data.min()
         data /= data.max()

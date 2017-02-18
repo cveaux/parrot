@@ -314,7 +314,7 @@ else:
                 new_speakers_tr_old, latent_var_tr_old, LATENT_NUM * args.num_samples)
 
             for j, this_sample in enumerate(gen_x.swapaxes(1, 0)):
-                this_sample = this_sample[:int(features_mask_tr_old.sum(axis=0)[i])]
+                this_sample = this_sample[:int(features_mask_tr_old.sum(axis=0)[j])]
                 generate_wav(
                     this_sample,
                     os.path.join(args.save_dir, 'samples', 'adaptation'),

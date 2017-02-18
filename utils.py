@@ -324,9 +324,30 @@ def sample_parse():
     parser.add_argument('--initial_iters', type=int,
                         default=0,
                         help='Number of iterations already done')
+    parser.add_argument('--new_dataset', type=str,
+                        default="librispeech",
+                        help='New data set to generate from')
+
+    parser.add_argument('--save_new', type=t_or_f,
+                        default=True,
+                        help='Save samples from the new dataset')
+
 
     args = parser.parse_args()
     if args.dataset not in args.save_dir:
         args.save_dir = os.path.join(args.save_dir, args.dataset)
 
     return args
+
+
+def write_audio_file(name, data, path_to_save):
+    import scipy.io.wavfile
+    data = data.astype('float32')
+    data -= data.min()
+    data /= data.max()
+    data -= 0.5
+    data *= 0.95
+    scipy.io.wavfile.write(
+                os.path.join(path_to_save, name+'.wav'),
+                16000,
+                data)
